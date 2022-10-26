@@ -1,0 +1,3801 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="422" onload="init(evt)" viewBox="0 0 1200 422" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="422.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="405" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="405" > </text>
+<g id="frames">
+<g >
+<title>reflect.toType (3 samples, 0.07%)</title><rect x="960.3" y="245" width="0.8" height="15.0" fill="rgb(235,64,28)" rx="2" ry="2" />
+<text  x="963.28" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (4 samples, 0.10%)</title><rect x="848.5" y="213" width="1.2" height="15.0" fill="rgb(222,39,34)" rx="2" ry="2" />
+<text  x="851.53" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (3 samples, 0.07%)</title><rect x="1102.9" y="213" width="0.8" height="15.0" fill="rgb(222,7,8)" rx="2" ry="2" />
+<text  x="1105.87" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (4 samples, 0.10%)</title><rect x="1091.3" y="197" width="1.1" height="15.0" fill="rgb(215,123,48)" rx="2" ry="2" />
+<text  x="1094.27" y="207.5" ></text>
+</g>
+<g >
+<title>reflect.valueInterface (3 samples, 0.07%)</title><rect x="1107.7" y="261" width="0.8" height="15.0" fill="rgb(207,208,4)" rx="2" ry="2" />
+<text  x="1110.67" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.(*spanSet).push (1 samples, 0.02%)</title><rect x="1061.3" y="133" width="0.3" height="15.0" fill="rgb(221,155,36)" rx="2" ry="2" />
+<text  x="1064.28" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.exitsyscallfast (13 samples, 0.31%)</title><rect x="167.6" y="117" width="3.7" height="15.0" fill="rgb(248,203,24)" rx="2" ry="2" />
+<text  x="170.58" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (3 samples, 0.07%)</title><rect x="1096.4" y="213" width="0.8" height="15.0" fill="rgb(239,91,32)" rx="2" ry="2" />
+<text  x="1099.36" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*fixalloc).free (1 samples, 0.02%)</title><rect x="1144.5" y="261" width="0.2" height="15.0" fill="rgb(208,73,53)" rx="2" ry="2" />
+<text  x="1147.45" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgparser.(*noMuxHandler).Unmarshal (39 samples, 0.94%)</title><rect x="101.1" y="277" width="11.0" height="15.0" fill="rgb(214,72,45)" rx="2" ry="2" />
+<text  x="104.10" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.(*gcBitsArena).tryAlloc (1 samples, 0.02%)</title><rect x="1071.5" y="37" width="0.2" height="15.0" fill="rgb(221,188,9)" rx="2" ry="2" />
+<text  x="1074.46" y="47.5" ></text>
+</g>
+<g >
+<title>runtime.callers.func1 (1 samples, 0.02%)</title><rect x="1133.1" y="197" width="0.3" height="15.0" fill="rgb(234,152,26)" rx="2" ry="2" />
+<text  x="1136.14" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (1 samples, 0.02%)</title><rect x="965.9" y="165" width="0.3" height="15.0" fill="rgb(210,211,15)" rx="2" ry="2" />
+<text  x="968.94" y="175.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).Get (4 samples, 0.10%)</title><rect x="1105.7" y="261" width="1.1" height="15.0" fill="rgb(246,20,22)" rx="2" ry="2" />
+<text  x="1108.69" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.startm (1 samples, 0.02%)</title><rect x="1147.3" y="245" width="0.3" height="15.0" fill="rgb(211,101,28)" rx="2" ry="2" />
+<text  x="1150.28" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.schedule (1 samples, 0.02%)</title><rect x="1188.9" y="325" width="0.3" height="15.0" fill="rgb(221,105,50)" rx="2" ry="2" />
+<text  x="1191.87" y="335.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.onDebug (11 samples, 0.26%)</title><rect x="860.4" y="261" width="3.1" height="15.0" fill="rgb(223,126,0)" rx="2" ry="2" />
+<text  x="863.41" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/zbh255/bilog.(*TimeFactory).appendBuf (3 samples, 0.07%)</title><rect x="1137.9" y="341" width="0.9" height="15.0" fill="rgb(220,172,1)" rx="2" ry="2" />
+<text  x="1140.95" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.puintptr.ptr (1 samples, 0.02%)</title><rect x="171.3" y="133" width="0.2" height="15.0" fill="rgb(240,68,6)" rx="2" ry="2" />
+<text  x="174.26" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.finishsweep_m (1 samples, 0.02%)</title><rect x="861.5" y="165" width="0.3" height="15.0" fill="rgb(218,146,6)" rx="2" ry="2" />
+<text  x="864.55" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.runOneTimer (2 samples, 0.05%)</title><rect x="1181.8" y="245" width="0.6" height="15.0" fill="rgb(248,154,2)" rx="2" ry="2" />
+<text  x="1184.80" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc (7 samples, 0.17%)</title><rect x="901.2" y="133" width="1.9" height="15.0" fill="rgb(216,212,23)" rx="2" ry="2" />
+<text  x="904.15" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).countAlloc (1 samples, 0.02%)</title><rect x="1142.8" y="325" width="0.2" height="15.0" fill="rgb(207,187,40)" rx="2" ry="2" />
+<text  x="1145.75" y="335.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*Server).callHandleUnit (2,999 samples, 71.90%)</title><rect x="138.4" y="293" width="848.5" height="15.0" fill="rgb(243,191,22)" rx="2" ry="2" />
+<text  x="141.44" y="303.5" >github.com/nyan233/littlerpc/server.(*Server).callHandleUnit</text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (8 samples, 0.19%)</title><rect x="969.1" y="213" width="2.2" height="15.0" fill="rgb(216,1,50)" rx="2" ry="2" />
+<text  x="972.05" y="223.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).getSlow (1 samples, 0.02%)</title><rect x="1106.3" y="245" width="0.2" height="15.0" fill="rgb(219,60,15)" rx="2" ry="2" />
+<text  x="1109.26" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.scanobject (1 samples, 0.02%)</title><rect x="1129.2" y="181" width="0.3" height="15.0" fill="rgb(240,76,48)" rx="2" ry="2" />
+<text  x="1132.18" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).grow (1 samples, 0.02%)</title><rect x="1096.4" y="165" width="0.2" height="15.0" fill="rgb(222,62,9)" rx="2" ry="2" />
+<text  x="1099.36" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.lock2 (1 samples, 0.02%)</title><rect x="1186.6" y="309" width="0.3" height="15.0" fill="rgb(244,224,1)" rx="2" ry="2" />
+<text  x="1189.61" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.lockWithRank (1 samples, 0.02%)</title><rect x="1185.8" y="293" width="0.2" height="15.0" fill="rgb(246,10,26)" rx="2" ry="2" />
+<text  x="1188.76" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).grow (6 samples, 0.14%)</title><rect x="1070.3" y="133" width="1.7" height="15.0" fill="rgb(229,82,44)" rx="2" ry="2" />
+<text  x="1073.33" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.gcMarkDone.func1 (7 samples, 0.17%)</title><rect x="1147.6" y="309" width="1.9" height="15.0" fill="rgb(240,223,53)" rx="2" ry="2" />
+<text  x="1150.56" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierDX (2 samples, 0.05%)</title><rect x="965.4" y="245" width="0.5" height="15.0" fill="rgb(225,94,2)" rx="2" ry="2" />
+<text  x="968.37" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (9 samples, 0.22%)</title><rect x="1042.0" y="165" width="2.6" height="15.0" fill="rgb(241,142,20)" rx="2" ry="2" />
+<text  x="1045.04" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.casgstatus (1 samples, 0.02%)</title><rect x="859.6" y="53" width="0.2" height="15.0" fill="rgb(224,216,7)" rx="2" ry="2" />
+<text  x="862.57" y="63.5" ></text>
+</g>
+<g >
+<title>runtime.bgscavenge (7 samples, 0.17%)</title><rect x="1138.8" y="357" width="2.0" height="15.0" fill="rgb(245,49,22)" rx="2" ry="2" />
+<text  x="1141.79" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.getMCache (2 samples, 0.05%)</title><rect x="975.0" y="261" width="0.6" height="15.0" fill="rgb(218,219,30)" rx="2" ry="2" />
+<text  x="977.99" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.mcall (56 samples, 1.34%)</title><rect x="1173.3" y="357" width="15.9" height="15.0" fill="rgb(211,96,32)" rx="2" ry="2" />
+<text  x="1176.31" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.startm (1 samples, 0.02%)</title><rect x="1188.9" y="277" width="0.3" height="15.0" fill="rgb(217,32,33)" rx="2" ry="2" />
+<text  x="1191.87" y="287.5" ></text>
+</g>
+<g >
+<title>aeshashbody (1 samples, 0.02%)</title><rect x="958.0" y="165" width="0.3" height="15.0" fill="rgb(251,64,35)" rx="2" ry="2" />
+<text  x="961.02" y="175.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Conn).doWrite (1 samples, 0.02%)</title><rect x="159.1" y="181" width="0.3" height="15.0" fill="rgb(232,84,29)" rx="2" ry="2" />
+<text  x="162.09" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc.func1 (1 samples, 0.02%)</title><rect x="1129.2" y="229" width="0.3" height="15.0" fill="rgb(217,22,33)" rx="2" ry="2" />
+<text  x="1132.18" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.gcStart.func1 (1 samples, 0.02%)</title><rect x="861.5" y="181" width="0.3" height="15.0" fill="rgb(239,165,2)" rx="2" ry="2" />
+<text  x="864.55" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.gcDrainN (1 samples, 0.02%)</title><rect x="977.3" y="181" width="0.2" height="15.0" fill="rgb(213,226,28)" rx="2" ry="2" />
+<text  x="980.25" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (1 samples, 0.02%)</title><rect x="965.9" y="213" width="0.3" height="15.0" fill="rgb(231,178,5)" rx="2" ry="2" />
+<text  x="968.94" y="223.5" ></text>
+</g>
+<g >
+<title>sync.(*poolChain).popTail (1 samples, 0.02%)</title><rect x="1106.3" y="229" width="0.2" height="15.0" fill="rgb(248,191,23)" rx="2" ry="2" />
+<text  x="1109.26" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (34 samples, 0.82%)</title><rect x="1126.1" y="293" width="9.6" height="15.0" fill="rgb(218,3,26)" rx="2" ry="2" />
+<text  x="1129.06" y="303.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgparser.(*SimpleAllocTor).FreeMessage (12 samples, 0.29%)</title><rect x="85.5" y="293" width="3.4" height="15.0" fill="rgb(250,222,49)" rx="2" ry="2" />
+<text  x="88.54" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsForAddr (3 samples, 0.07%)</title><rect x="124.9" y="245" width="0.8" height="15.0" fill="rgb(223,44,24)" rx="2" ry="2" />
+<text  x="127.86" y="255.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall (229 samples, 5.49%)</title><rect x="18.5" y="261" width="64.8" height="15.0" fill="rgb(227,143,29)" rx="2" ry="2" />
+<text  x="21.49" y="271.5" >syscall..</text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*pluginManager).OnCallBefore (3 samples, 0.07%)</title><rect x="1106.8" y="277" width="0.9" height="15.0" fill="rgb(210,3,18)" rx="2" ry="2" />
+<text  x="1109.83" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 0.02%)</title><rect x="903.7" y="133" width="0.3" height="15.0" fill="rgb(247,14,49)" rx="2" ry="2" />
+<text  x="906.70" y="143.5" ></text>
+</g>
+<g >
+<title>sync.(*poolChain).pushHead (7 samples, 0.17%)</title><rect x="87.0" y="261" width="1.9" height="15.0" fill="rgb(227,163,39)" rx="2" ry="2" />
+<text  x="89.95" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).Length (2 samples, 0.05%)</title><rect x="100.5" y="261" width="0.6" height="15.0" fill="rgb(205,44,11)" rx="2" ry="2" />
+<text  x="103.53" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 0.02%)</title><rect x="903.7" y="101" width="0.3" height="15.0" fill="rgb(236,72,10)" rx="2" ry="2" />
+<text  x="906.70" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.findfunc (1 samples, 0.02%)</title><rect x="908.2" y="101" width="0.3" height="15.0" fill="rgb(208,165,16)" rx="2" ry="2" />
+<text  x="911.23" y="111.5" ></text>
+</g>
+<g >
+<title>sync.(*poolChain).popHead (1 samples, 0.02%)</title><rect x="100.0" y="245" width="0.2" height="15.0" fill="rgb(217,21,54)" rx="2" ry="2" />
+<text  x="102.96" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).allocSpan (5 samples, 0.12%)</title><rect x="1070.3" y="69" width="1.4" height="15.0" fill="rgb(240,17,39)" rx="2" ry="2" />
+<text  x="1073.33" y="79.5" ></text>
+</g>
+<g >
+<title>runtime.wakep (2 samples, 0.05%)</title><rect x="1181.8" y="165" width="0.6" height="15.0" fill="rgb(238,21,33)" rx="2" ry="2" />
+<text  x="1184.80" y="175.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common.WriteControl (2,422 samples, 58.07%)</title><rect x="154.8" y="229" width="685.2" height="15.0" fill="rgb(248,119,44)" rx="2" ry="2" />
+<text  x="157.85" y="239.5" >github.com/nyan233/littlerpc/pkg/common.WriteControl</text>
+</g>
+<g >
+<title>runtime.systemstack (9 samples, 0.22%)</title><rect x="1042.0" y="181" width="2.6" height="15.0" fill="rgb(216,3,48)" rx="2" ry="2" />
+<text  x="1045.04" y="191.5" ></text>
+</g>
+<g >
+<title>sync.(*poolChain).pushHead (1 samples, 0.02%)</title><rect x="150.9" y="245" width="0.3" height="15.0" fill="rgb(208,2,17)" rx="2" ry="2" />
+<text  x="153.89" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="124.3" y="165" width="0.3" height="15.0" fill="rgb(238,204,31)" rx="2" ry="2" />
+<text  x="127.29" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 0.02%)</title><rect x="870.0" y="229" width="0.3" height="15.0" fill="rgb(206,60,52)" rx="2" ry="2" />
+<text  x="873.03" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.schedule (37 samples, 0.89%)</title><rect x="1176.1" y="309" width="10.5" height="15.0" fill="rgb(222,13,16)" rx="2" ry="2" />
+<text  x="1179.14" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.releasem (2 samples, 0.05%)</title><rect x="1063.5" y="197" width="0.6" height="15.0" fill="rgb(224,171,4)" rx="2" ry="2" />
+<text  x="1066.54" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (1 samples, 0.02%)</title><rect x="125.7" y="245" width="0.3" height="15.0" fill="rgb(225,199,10)" rx="2" ry="2" />
+<text  x="128.71" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Append (9 samples, 0.22%)</title><rect x="107.3" y="245" width="2.6" height="15.0" fill="rgb(247,191,12)" rx="2" ry="2" />
+<text  x="110.32" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (1 samples, 0.02%)</title><rect x="863.8" y="181" width="0.3" height="15.0" fill="rgb(208,120,28)" rx="2" ry="2" />
+<text  x="866.81" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).divideByElemSize (1 samples, 0.02%)</title><rect x="863.8" y="165" width="0.3" height="15.0" fill="rgb(237,118,40)" rx="2" ry="2" />
+<text  x="866.81" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (3 samples, 0.07%)</title><rect x="862.7" y="213" width="0.8" height="15.0" fill="rgb(206,25,17)" rx="2" ry="2" />
+<text  x="865.68" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (1 samples, 0.02%)</title><rect x="150.9" y="133" width="0.3" height="15.0" fill="rgb(211,68,11)" rx="2" ry="2" />
+<text  x="153.89" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.(*spanSet).push (1 samples, 0.02%)</title><rect x="1096.6" y="165" width="0.3" height="15.0" fill="rgb(230,0,1)" rx="2" ry="2" />
+<text  x="1099.64" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).cacheSpan (8 samples, 0.19%)</title><rect x="900.9" y="165" width="2.2" height="15.0" fill="rgb(222,83,16)" rx="2" ry="2" />
+<text  x="903.87" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="920.4" y="229" width="0.3" height="15.0" fill="rgb(230,164,6)" rx="2" ry="2" />
+<text  x="923.39" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.wirep (2 samples, 0.05%)</title><rect x="170.7" y="101" width="0.6" height="15.0" fill="rgb(211,127,10)" rx="2" ry="2" />
+<text  x="173.69" y="111.5" ></text>
+</g>
+<g >
+<title>memeqbody (1 samples, 0.02%)</title><rect x="1110.8" y="261" width="0.3" height="15.0" fill="rgb(232,190,31)" rx="2" ry="2" />
+<text  x="1113.79" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (4 samples, 0.10%)</title><rect x="868.9" y="229" width="1.1" height="15.0" fill="rgb(231,158,11)" rx="2" ry="2" />
+<text  x="871.90" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.unlockWithRank (7 samples, 0.17%)</title><rect x="1186.9" y="325" width="2.0" height="15.0" fill="rgb(226,131,21)" rx="2" ry="2" />
+<text  x="1189.89" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).grow (1 samples, 0.02%)</title><rect x="1111.9" y="197" width="0.3" height="15.0" fill="rgb(215,16,48)" rx="2" ry="2" />
+<text  x="1114.92" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc1 (1 samples, 0.02%)</title><rect x="1097.5" y="165" width="0.3" height="15.0" fill="rgb(242,184,28)" rx="2" ry="2" />
+<text  x="1100.49" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.slicebytetostring (66 samples, 1.58%)</title><rect x="1064.1" y="213" width="18.7" height="15.0" fill="rgb(248,139,33)" rx="2" ry="2" />
+<text  x="1067.11" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (11 samples, 0.26%)</title><rect x="1070.0" y="165" width="3.2" height="15.0" fill="rgb(220,37,10)" rx="2" ry="2" />
+<text  x="1073.05" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.typehash (1 samples, 0.02%)</title><rect x="958.0" y="181" width="0.3" height="15.0" fill="rgb(251,71,49)" rx="2" ry="2" />
+<text  x="961.02" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.(*sweepLocker).tryAcquire (2 samples, 0.05%)</title><rect x="1145.9" y="325" width="0.5" height="15.0" fill="rgb(214,143,35)" rx="2" ry="2" />
+<text  x="1148.87" y="335.5" ></text>
+</g>
+<g >
+<title>errors.Is (3 samples, 0.07%)</title><rect x="16.2" y="325" width="0.9" height="15.0" fill="rgb(224,120,41)" rx="2" ry="2" />
+<text  x="19.22" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierR9 (1 samples, 0.02%)</title><rect x="113.3" y="277" width="0.2" height="15.0" fill="rgb(250,213,17)" rx="2" ry="2" />
+<text  x="116.26" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.(*scavengerState).init.func2 (7 samples, 0.17%)</title><rect x="1138.8" y="325" width="2.0" height="15.0" fill="rgb(253,13,19)" rx="2" ry="2" />
+<text  x="1141.79" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.lock2 (1 samples, 0.02%)</title><rect x="1185.8" y="277" width="0.2" height="15.0" fill="rgb(232,94,43)" rx="2" ry="2" />
+<text  x="1188.76" y="287.5" ></text>
+</g>
+<g >
+<title>reflect.(*rtype).Kind (2 samples, 0.05%)</title><rect x="1100.6" y="261" width="0.6" height="15.0" fill="rgb(241,188,2)" rx="2" ry="2" />
+<text  x="1103.60" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (1 samples, 0.02%)</title><rect x="1108.8" y="213" width="0.3" height="15.0" fill="rgb(253,5,42)" rx="2" ry="2" />
+<text  x="1111.81" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1189.7" y="357" width="0.3" height="15.0" fill="rgb(241,106,23)" rx="2" ry="2" />
+<text  x="1192.72" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (2 samples, 0.05%)</title><rect x="1096.4" y="197" width="0.5" height="15.0" fill="rgb(218,48,31)" rx="2" ry="2" />
+<text  x="1099.36" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.callers.func1 (1 samples, 0.02%)</title><rect x="1104.6" y="165" width="0.2" height="15.0" fill="rgb(237,186,43)" rx="2" ry="2" />
+<text  x="1107.56" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="965.9" y="229" width="0.3" height="15.0" fill="rgb(205,117,16)" rx="2" ry="2" />
+<text  x="968.94" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common.CheckCoderType (324 samples, 7.77%)</title><rect x="995.4" y="261" width="91.6" height="15.0" fill="rgb(248,168,29)" rx="2" ry="2" />
+<text  x="998.36" y="271.5" >github.com..</text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (1 samples, 0.02%)</title><rect x="863.5" y="213" width="0.3" height="15.0" fill="rgb(251,200,49)" rx="2" ry="2" />
+<text  x="866.53" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*spanSet).reset (1 samples, 0.02%)</title><rect x="861.5" y="149" width="0.3" height="15.0" fill="rgb(208,35,13)" rx="2" ry="2" />
+<text  x="864.55" y="159.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).GetMsgType (1 samples, 0.02%)</title><rect x="89.2" y="309" width="0.3" height="15.0" fill="rgb(205,194,32)" rx="2" ry="2" />
+<text  x="92.21" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.makeslice (17 samples, 0.41%)</title><rect x="113.8" y="277" width="4.8" height="15.0" fill="rgb(208,9,2)" rx="2" ry="2" />
+<text  x="116.83" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierBX (1 samples, 0.02%)</title><rect x="1118.7" y="277" width="0.3" height="15.0" fill="rgb(251,98,30)" rx="2" ry="2" />
+<text  x="1121.71" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.findObject (1 samples, 0.02%)</title><rect x="137.3" y="181" width="0.3" height="15.0" fill="rgb(238,10,37)" rx="2" ry="2" />
+<text  x="140.31" y="191.5" ></text>
+</g>
+<g >
+<title>reflect.(*abiSeq).stepsForValue (8 samples, 0.19%)</title><rect x="928.0" y="261" width="2.3" height="15.0" fill="rgb(231,214,43)" rx="2" ry="2" />
+<text  x="931.03" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc.func1 (1 samples, 0.02%)</title><rect x="124.6" y="213" width="0.3" height="15.0" fill="rgb(225,41,36)" rx="2" ry="2" />
+<text  x="127.58" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Reset (1 samples, 0.02%)</title><rect x="148.6" y="245" width="0.3" height="15.0" fill="rgb(233,217,13)" rx="2" ry="2" />
+<text  x="151.62" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.heapBits.bits (16 samples, 0.38%)</title><rect x="1149.5" y="293" width="4.6" height="15.0" fill="rgb(244,119,44)" rx="2" ry="2" />
+<text  x="1152.54" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.nilinterhash (8 samples, 0.19%)</title><rect x="990.8" y="229" width="2.3" height="15.0" fill="rgb(238,68,4)" rx="2" ry="2" />
+<text  x="993.83" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.notewakeup (2 samples, 0.05%)</title><rect x="1181.8" y="133" width="0.6" height="15.0" fill="rgb(239,70,25)" rx="2" ry="2" />
+<text  x="1184.80" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierBX (1 samples, 0.02%)</title><rect x="1123.2" y="277" width="0.3" height="15.0" fill="rgb(247,0,14)" rx="2" ry="2" />
+<text  x="1126.23" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierSI (1 samples, 0.02%)</title><rect x="1106.0" y="245" width="0.3" height="15.0" fill="rgb(243,37,35)" rx="2" ry="2" />
+<text  x="1108.98" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Engine).initHandlers.func6 (1 samples, 0.02%)</title><rect x="83.3" y="309" width="0.3" height="15.0" fill="rgb(226,215,21)" rx="2" ry="2" />
+<text  x="86.27" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.duffcopy (4 samples, 0.10%)</title><rect x="951.8" y="229" width="1.1" height="15.0" fill="rgb(253,141,31)" rx="2" ry="2" />
+<text  x="954.79" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*consistentHeapStats).release (1 samples, 0.02%)</title><rect x="1143.9" y="309" width="0.3" height="15.0" fill="rgb(206,53,14)" rx="2" ry="2" />
+<text  x="1146.89" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.spillArgs (1 samples, 0.02%)</title><rect x="973.6" y="245" width="0.3" height="15.0" fill="rgb(226,58,20)" rx="2" ry="2" />
+<text  x="976.58" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.getitab (14 samples, 0.34%)</title><rect x="1082.8" y="213" width="3.9" height="15.0" fill="rgb(219,51,40)" rx="2" ry="2" />
+<text  x="1085.78" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (9 samples, 0.22%)</title><rect x="1042.0" y="197" width="2.6" height="15.0" fill="rgb(219,40,3)" rx="2" ry="2" />
+<text  x="1045.04" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="965.9" y="197" width="0.3" height="15.0" fill="rgb(238,6,29)" rx="2" ry="2" />
+<text  x="968.94" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.semrelease1 (1 samples, 0.02%)</title><rect x="859.6" y="149" width="0.2" height="15.0" fill="rgb(242,69,37)" rx="2" ry="2" />
+<text  x="862.57" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (7 samples, 0.17%)</title><rect x="909.1" y="213" width="2.0" height="15.0" fill="rgb(248,123,27)" rx="2" ry="2" />
+<text  x="912.07" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.unlockWithRank (1 samples, 0.02%)</title><rect x="1145.3" y="277" width="0.3" height="15.0" fill="rgb(247,54,7)" rx="2" ry="2" />
+<text  x="1148.30" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.nilinterequal (3 samples, 0.07%)</title><rect x="957.2" y="197" width="0.8" height="15.0" fill="rgb(230,214,7)" rx="2" ry="2" />
+<text  x="960.17" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.mProf_Malloc (1 samples, 0.02%)</title><rect x="1137.9" y="261" width="0.3" height="15.0" fill="rgb(241,207,11)" rx="2" ry="2" />
+<text  x="1140.95" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (3 samples, 0.07%)</title><rect x="848.8" y="197" width="0.9" height="15.0" fill="rgb(254,195,19)" rx="2" ry="2" />
+<text  x="851.82" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.unlock2 (1 samples, 0.02%)</title><rect x="1145.3" y="261" width="0.3" height="15.0" fill="rgb(219,23,54)" rx="2" ry="2" />
+<text  x="1148.30" y="271.5" ></text>
+</g>
+<g >
+<title>sync.(*entry).load (1 samples, 0.02%)</title><rect x="993.1" y="261" width="0.3" height="15.0" fill="rgb(249,130,50)" rx="2" ry="2" />
+<text  x="996.10" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 0.02%)</title><rect x="1188.9" y="229" width="0.3" height="15.0" fill="rgb(233,21,35)" rx="2" ry="2" />
+<text  x="1191.87" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (11 samples, 0.26%)</title><rect x="975.6" y="261" width="3.1" height="15.0" fill="rgb(218,21,29)" rx="2" ry="2" />
+<text  x="978.56" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierBX (1 samples, 0.02%)</title><rect x="863.8" y="261" width="0.3" height="15.0" fill="rgb(239,206,36)" rx="2" ry="2" />
+<text  x="866.81" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.gcStart (1 samples, 0.02%)</title><rect x="861.5" y="213" width="0.3" height="15.0" fill="rgb(234,225,12)" rx="2" ry="2" />
+<text  x="864.55" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierSI (1 samples, 0.02%)</title><rect x="965.9" y="245" width="0.3" height="15.0" fill="rgb(250,38,8)" rx="2" ry="2" />
+<text  x="968.94" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.markrootBlock (1 samples, 0.02%)</title><rect x="1157.2" y="277" width="0.3" height="15.0" fill="rgb(219,171,25)" rx="2" ry="2" />
+<text  x="1160.18" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.arenaIndex (1 samples, 0.02%)</title><rect x="115.2" y="245" width="0.3" height="15.0" fill="rgb(230,171,9)" rx="2" ry="2" />
+<text  x="118.24" y="255.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall (2,397 samples, 57.47%)</title><rect x="160.8" y="149" width="678.1" height="15.0" fill="rgb(216,84,19)" rx="2" ry="2" />
+<text  x="163.79" y="159.5" >syscall.Syscall</text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (1 samples, 0.02%)</title><rect x="1108.8" y="229" width="0.3" height="15.0" fill="rgb(241,152,25)" rx="2" ry="2" />
+<text  x="1111.81" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (1 samples, 0.02%)</title><rect x="977.0" y="229" width="0.3" height="15.0" fill="rgb(209,5,31)" rx="2" ry="2" />
+<text  x="979.97" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.makeslice (26 samples, 0.62%)</title><rect x="966.2" y="245" width="7.4" height="15.0" fill="rgb(239,36,36)" rx="2" ry="2" />
+<text  x="969.22" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).freeSpan (4 samples, 0.10%)</title><rect x="1144.5" y="309" width="1.1" height="15.0" fill="rgb(239,14,53)" rx="2" ry="2" />
+<text  x="1147.45" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.startm (2 samples, 0.05%)</title><rect x="1181.8" y="149" width="0.6" height="15.0" fill="rgb(216,153,46)" rx="2" ry="2" />
+<text  x="1184.80" y="159.5" ></text>
+</g>
+<g >
+<title>reflect.Value.Interface (3 samples, 0.07%)</title><rect x="1107.7" y="277" width="0.8" height="15.0" fill="rgb(221,172,15)" rx="2" ry="2" />
+<text  x="1110.67" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1111.9" y="165" width="0.3" height="15.0" fill="rgb(232,146,26)" rx="2" ry="2" />
+<text  x="1114.92" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (2 samples, 0.05%)</title><rect x="925.2" y="197" width="0.6" height="15.0" fill="rgb(228,115,22)" rx="2" ry="2" />
+<text  x="928.20" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 0.02%)</title><rect x="1104.3" y="229" width="0.3" height="15.0" fill="rgb(248,16,29)" rx="2" ry="2" />
+<text  x="1107.28" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.Unmarshal (36 samples, 0.86%)</title><rect x="101.9" y="261" width="10.2" height="15.0" fill="rgb(230,55,37)" rx="2" ry="2" />
+<text  x="104.94" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (20 samples, 0.48%)</title><rect x="121.2" y="277" width="5.6" height="15.0" fill="rgb(213,216,8)" rx="2" ry="2" />
+<text  x="124.18" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (2 samples, 0.05%)</title><rect x="965.4" y="197" width="0.5" height="15.0" fill="rgb(227,224,49)" rx="2" ry="2" />
+<text  x="968.37" y="207.5" ></text>
+</g>
+<g >
+<title>sync.(*Map).Load (16 samples, 0.38%)</title><rect x="988.6" y="261" width="4.5" height="15.0" fill="rgb(224,42,2)" rx="2" ry="2" />
+<text  x="991.57" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.nilinterhash (3 samples, 0.07%)</title><rect x="130.2" y="261" width="0.9" height="15.0" fill="rgb(247,19,30)" rx="2" ry="2" />
+<text  x="133.23" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (24 samples, 0.58%)</title><rect x="1126.6" y="277" width="6.8" height="15.0" fill="rgb(212,145,54)" rx="2" ry="2" />
+<text  x="1129.63" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.memequal128 (3 samples, 0.07%)</title><rect x="957.2" y="165" width="0.8" height="15.0" fill="rgb(237,37,3)" rx="2" ry="2" />
+<text  x="960.17" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.makeslice (1 samples, 0.02%)</title><rect x="1137.9" y="309" width="0.3" height="15.0" fill="rgb(253,149,54)" rx="2" ry="2" />
+<text  x="1140.95" y="319.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.noRaceGetReadBufferFromPoller (6 samples, 0.14%)</title><rect x="10.6" y="325" width="1.7" height="15.0" fill="rgb(247,74,23)" rx="2" ry="2" />
+<text  x="13.57" y="335.5" ></text>
+</g>
+<g >
+<title>reflect.(*rtype).NumIn (1 samples, 0.02%)</title><rect x="949.8" y="245" width="0.3" height="15.0" fill="rgb(225,190,48)" rx="2" ry="2" />
+<text  x="952.81" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (2 samples, 0.05%)</title><rect x="1061.0" y="181" width="0.6" height="15.0" fill="rgb(253,15,38)" rx="2" ry="2" />
+<text  x="1063.99" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierSI (1 samples, 0.02%)</title><rect x="864.1" y="261" width="0.3" height="15.0" fill="rgb(229,163,16)" rx="2" ry="2" />
+<text  x="867.09" y="271.5" ></text>
+</g>
+<g >
+<title>memeqbody (3 samples, 0.07%)</title><rect x="989.7" y="181" width="0.9" height="15.0" fill="rgb(224,123,10)" rx="2" ry="2" />
+<text  x="992.70" y="191.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Conn).overflow (2 samples, 0.05%)</title><rect x="158.2" y="197" width="0.6" height="15.0" fill="rgb(206,73,39)" rx="2" ry="2" />
+<text  x="161.24" y="207.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Engine).PollerBuffer (1 samples, 0.02%)</title><rect x="10.3" y="325" width="0.3" height="15.0" fill="rgb(230,13,25)" rx="2" ry="2" />
+<text  x="13.28" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierR8 (1 samples, 0.02%)</title><rect x="113.0" y="261" width="0.3" height="15.0" fill="rgb(243,127,15)" rx="2" ry="2" />
+<text  x="115.98" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Engine).payback (1 samples, 0.02%)</title><rect x="12.3" y="341" width="0.2" height="15.0" fill="rgb(215,3,29)" rx="2" ry="2" />
+<text  x="15.26" y="351.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*Server).callHandleUnit.func1 (13 samples, 0.31%)</title><rect x="147.5" y="277" width="3.7" height="15.0" fill="rgb(243,95,18)" rx="2" ry="2" />
+<text  x="150.49" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (3 samples, 0.07%)</title><rect x="1104.8" y="245" width="0.9" height="15.0" fill="rgb(229,192,35)" rx="2" ry="2" />
+<text  x="1107.85" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.execute (1 samples, 0.02%)</title><rect x="97.7" y="197" width="0.3" height="15.0" fill="rgb(231,188,43)" rx="2" ry="2" />
+<text  x="100.70" y="207.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgwriter.LRPCWriter (2,503 samples, 60.01%)</title><rect x="152.3" y="261" width="708.1" height="15.0" fill="rgb(238,121,32)" rx="2" ry="2" />
+<text  x="155.30" y="271.5" >github.com/nyan233/littlerpc/pkg/common/msgwriter.LRPCWriter</text>
+</g>
+<g >
+<title>runtime.(*lfstack).push (1 samples, 0.02%)</title><rect x="1181.5" y="261" width="0.3" height="15.0" fill="rgb(249,0,36)" rx="2" ry="2" />
+<text  x="1184.51" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.(*spanSet).push (1 samples, 0.02%)</title><rect x="903.1" y="149" width="0.3" height="15.0" fill="rgb(216,177,31)" rx="2" ry="2" />
+<text  x="906.13" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.(*pageAlloc).scavenge.func1 (7 samples, 0.17%)</title><rect x="1138.8" y="277" width="2.0" height="15.0" fill="rgb(250,176,14)" rx="2" ry="2" />
+<text  x="1141.79" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.scanstack.func1 (1 samples, 0.02%)</title><rect x="1156.3" y="229" width="0.3" height="15.0" fill="rgb(221,44,16)" rx="2" ry="2" />
+<text  x="1159.33" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).base (1 samples, 0.02%)</title><rect x="849.1" y="133" width="0.3" height="15.0" fill="rgb(252,126,45)" rx="2" ry="2" />
+<text  x="852.10" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.gentraceback (3 samples, 0.07%)</title><rect x="908.2" y="117" width="0.9" height="15.0" fill="rgb(232,111,46)" rx="2" ry="2" />
+<text  x="911.23" y="127.5" ></text>
+</g>
+<g >
+<title>reflect.ifaceIndir (1 samples, 0.02%)</title><rect x="1108.2" y="245" width="0.3" height="15.0" fill="rgb(242,184,23)" rx="2" ry="2" />
+<text  x="1111.24" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 0.02%)</title><rect x="1092.4" y="197" width="0.3" height="15.0" fill="rgb(219,82,33)" rx="2" ry="2" />
+<text  x="1095.40" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc1 (1 samples, 0.02%)</title><rect x="977.3" y="197" width="0.2" height="15.0" fill="rgb(237,197,29)" rx="2" ry="2" />
+<text  x="980.25" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (6 samples, 0.14%)</title><rect x="115.8" y="245" width="1.7" height="15.0" fill="rgb(239,17,13)" rx="2" ry="2" />
+<text  x="118.81" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).Length.func1 (2 samples, 0.05%)</title><rect x="857.0" y="197" width="0.6" height="15.0" fill="rgb(252,167,0)" rx="2" ry="2" />
+<text  x="860.02" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.gcDrainN (1 samples, 0.02%)</title><rect x="1073.7" y="117" width="0.3" height="15.0" fill="rgb(228,29,53)" rx="2" ry="2" />
+<text  x="1076.73" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).uncacheSpan (1 samples, 0.02%)</title><rect x="977.0" y="213" width="0.3" height="15.0" fill="rgb(217,104,29)" rx="2" ry="2" />
+<text  x="979.97" y="223.5" ></text>
+</g>
+<g >
+<title>sync.runtime_Semrelease (1 samples, 0.02%)</title><rect x="859.6" y="165" width="0.2" height="15.0" fill="rgb(244,10,15)" rx="2" ry="2" />
+<text  x="862.57" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (14 samples, 0.34%)</title><rect x="975.0" y="277" width="4.0" height="15.0" fill="rgb(252,83,14)" rx="2" ry="2" />
+<text  x="977.99" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.asyncPreempt (1 samples, 0.02%)</title><rect x="889.6" y="213" width="0.2" height="15.0" fill="rgb(246,210,10)" rx="2" ry="2" />
+<text  x="892.55" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (3 samples, 0.07%)</title><rect x="908.2" y="149" width="0.9" height="15.0" fill="rgb(219,224,47)" rx="2" ry="2" />
+<text  x="911.23" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.profilealloc (1 samples, 0.02%)</title><rect x="1137.9" y="277" width="0.3" height="15.0" fill="rgb(221,114,18)" rx="2" ry="2" />
+<text  x="1140.95" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc.func1 (1 samples, 0.02%)</title><rect x="124.3" y="149" width="0.3" height="15.0" fill="rgb(220,222,24)" rx="2" ry="2" />
+<text  x="127.29" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.scanblock (1 samples, 0.02%)</title><rect x="1157.2" y="261" width="0.3" height="15.0" fill="rgb(243,96,9)" rx="2" ry="2" />
+<text  x="1160.18" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 0.02%)</title><rect x="859.3" y="165" width="0.3" height="15.0" fill="rgb(251,179,18)" rx="2" ry="2" />
+<text  x="862.28" y="175.5" ></text>
+</g>
+<g >
+<title>all (4,171 samples, 100%)</title><rect x="10.0" y="373" width="1180.0" height="15.0" fill="rgb(210,186,17)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgparser.(*SimpleAllocTor).AllocMessage (9 samples, 0.22%)</title><rect x="98.0" y="277" width="2.5" height="15.0" fill="rgb(243,172,33)" rx="2" ry="2" />
+<text  x="100.98" y="287.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).Get (5 samples, 0.12%)</title><rect x="984.9" y="277" width="1.4" height="15.0" fill="rgb(249,123,25)" rx="2" ry="2" />
+<text  x="987.89" y="287.5" ></text>
+</g>
+<g >
+<title>github.com/rpcxio/rpcx-benchmark/proto.(*BenchmarkMessage).MarshalTo (39 samples, 0.94%)</title><rect x="873.4" y="229" width="11.1" height="15.0" fill="rgb(251,172,16)" rx="2" ry="2" />
+<text  x="876.43" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc.func1 (1 samples, 0.02%)</title><rect x="1097.5" y="181" width="0.3" height="15.0" fill="rgb(236,140,33)" rx="2" ry="2" />
+<text  x="1100.49" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="977.3" y="229" width="0.2" height="15.0" fill="rgb(209,44,38)" rx="2" ry="2" />
+<text  x="980.25" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.profilealloc (1 samples, 0.02%)</title><rect x="1104.6" y="229" width="0.2" height="15.0" fill="rgb(241,101,42)" rx="2" ry="2" />
+<text  x="1107.56" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/rpcxio/rpcx-benchmark/littlerpc/codec.ProtoBufCodec.Marshal (147 samples, 3.52%)</title><rect x="872.9" y="261" width="41.5" height="15.0" fill="rgb(252,100,35)" rx="2" ry="2" />
+<text  x="875.86" y="271.5" >git..</text>
+</g>
+<g >
+<title>runtime.newobject (25 samples, 0.60%)</title><rect x="1093.5" y="245" width="7.1" height="15.0" fill="rgb(226,12,40)" rx="2" ry="2" />
+<text  x="1096.53" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 0.02%)</title><rect x="1112.8" y="245" width="0.2" height="15.0" fill="rgb(229,171,20)" rx="2" ry="2" />
+<text  x="1115.77" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.casgstatus (1 samples, 0.02%)</title><rect x="167.3" y="117" width="0.3" height="15.0" fill="rgb(229,129,53)" rx="2" ry="2" />
+<text  x="170.30" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.profilealloc (5 samples, 0.12%)</title><rect x="1074.3" y="181" width="1.4" height="15.0" fill="rgb(246,174,2)" rx="2" ry="2" />
+<text  x="1077.29" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="1106.0" y="229" width="0.3" height="15.0" fill="rgb(238,28,14)" rx="2" ry="2" />
+<text  x="1108.98" y="239.5" ></text>
+</g>
+<g >
+<title>runtime/internal/atomic.(*Uint32).CompareAndSwap (1 samples, 0.02%)</title><rect x="1072.9" y="149" width="0.3" height="15.0" fill="rgb(236,174,17)" rx="2" ry="2" />
+<text  x="1075.88" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).refillAllocCache (1 samples, 0.02%)</title><rect x="868.1" y="197" width="0.2" height="15.0" fill="rgb(220,160,26)" rx="2" ry="2" />
+<text  x="871.05" y="207.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.Marshal (54 samples, 1.29%)</title><rect x="842.9" y="245" width="15.3" height="15.0" fill="rgb(239,208,27)" rx="2" ry="2" />
+<text  x="845.87" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/plugins/metrics.(*ServerMetricsPlugin).OnMessage (10 samples, 0.24%)</title><rect x="1115.9" y="261" width="2.8" height="15.0" fill="rgb(230,143,22)" rx="2" ry="2" />
+<text  x="1118.88" y="271.5" ></text>
+</g>
+<g >
+<title>internal/reflectlite.(*rtype).Comparable (1 samples, 0.02%)</title><rect x="16.5" y="309" width="0.3" height="15.0" fill="rgb(239,60,10)" rx="2" ry="2" />
+<text  x="19.51" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (1 samples, 0.02%)</title><rect x="863.8" y="229" width="0.3" height="15.0" fill="rgb(240,125,43)" rx="2" ry="2" />
+<text  x="866.81" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (7 samples, 0.17%)</title><rect x="1138.8" y="293" width="2.0" height="15.0" fill="rgb(219,200,27)" rx="2" ry="2" />
+<text  x="1141.79" y="303.5" ></text>
+</g>
+<g >
+<title>syscall.write (2,402 samples, 57.59%)</title><rect x="159.4" y="165" width="679.5" height="15.0" fill="rgb(220,136,19)" rx="2" ry="2" />
+<text  x="162.37" y="175.5" >syscall.write</text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="113.0" y="245" width="0.3" height="15.0" fill="rgb(229,135,41)" rx="2" ry="2" />
+<text  x="115.98" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/rpcxio/rpcx-benchmark/proto.sovBenchmark (5 samples, 0.12%)</title><rect x="896.9" y="229" width="1.4" height="15.0" fill="rgb(243,217,26)" rx="2" ry="2" />
+<text  x="899.91" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="150.9" y="165" width="0.3" height="15.0" fill="rgb(235,39,54)" rx="2" ry="2" />
+<text  x="153.89" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 0.02%)</title><rect x="1147.3" y="197" width="0.3" height="15.0" fill="rgb(254,143,54)" rx="2" ry="2" />
+<text  x="1150.28" y="207.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).PayloadsIterator.func1 (2 samples, 0.05%)</title><rect x="1088.2" y="245" width="0.5" height="15.0" fill="rgb(252,219,47)" rx="2" ry="2" />
+<text  x="1091.15" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.mapaccess2 (15 samples, 0.36%)</title><rect x="988.9" y="245" width="4.2" height="15.0" fill="rgb(245,198,18)" rx="2" ry="2" />
+<text  x="991.85" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).cacheSpan (8 samples, 0.19%)</title><rect x="1070.3" y="149" width="2.3" height="15.0" fill="rgb(252,127,36)" rx="2" ry="2" />
+<text  x="1073.33" y="159.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/middle/packet.(*encoderWrapper).Instance (2 samples, 0.05%)</title><rect x="1122.7" y="277" width="0.5" height="15.0" fill="rgb(218,135,29)" rx="2" ry="2" />
+<text  x="1125.67" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (1 samples, 0.02%)</title><rect x="111.6" y="229" width="0.2" height="15.0" fill="rgb(219,66,43)" rx="2" ry="2" />
+<text  x="114.56" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (10 samples, 0.24%)</title><rect x="900.6" y="197" width="2.8" height="15.0" fill="rgb(214,74,6)" rx="2" ry="2" />
+<text  x="903.59" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.findObject (1 samples, 0.02%)</title><rect x="1118.7" y="181" width="0.3" height="15.0" fill="rgb(221,206,29)" rx="2" ry="2" />
+<text  x="1121.71" y="191.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.newConnDesc (36 samples, 0.86%)</title><rect x="1125.5" y="309" width="10.2" height="15.0" fill="rgb(226,108,8)" rx="2" ry="2" />
+<text  x="1128.50" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.markroot (4 samples, 0.10%)</title><rect x="1156.3" y="293" width="1.2" height="15.0" fill="rgb(230,182,0)" rx="2" ry="2" />
+<text  x="1159.33" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.assertE2I2 (14 samples, 0.34%)</title><rect x="1082.8" y="229" width="3.9" height="15.0" fill="rgb(205,171,4)" rx="2" ry="2" />
+<text  x="1085.78" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (3 samples, 0.07%)</title><rect x="1097.8" y="213" width="0.8" height="15.0" fill="rgb(243,150,12)" rx="2" ry="2" />
+<text  x="1100.77" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (1 samples, 0.02%)</title><rect x="1118.7" y="197" width="0.3" height="15.0" fill="rgb(246,34,16)" rx="2" ry="2" />
+<text  x="1121.71" y="207.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Conn).doRead (232 samples, 5.56%)</title><rect x="17.6" y="309" width="65.7" height="15.0" fill="rgb(210,166,10)" rx="2" ry="2" />
+<text  x="20.64" y="319.5" >github...</text>
+</g>
+<g >
+<title>runtime.mProf_Malloc (1 samples, 0.02%)</title><rect x="1133.1" y="245" width="0.3" height="15.0" fill="rgb(242,50,39)" rx="2" ry="2" />
+<text  x="1136.14" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="113.5" y="261" width="0.3" height="15.0" fill="rgb(232,149,34)" rx="2" ry="2" />
+<text  x="116.54" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.casgstatus (1 samples, 0.02%)</title><rect x="19.3" y="229" width="0.3" height="15.0" fill="rgb(241,171,34)" rx="2" ry="2" />
+<text  x="22.34" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.heapBits.initSpan (1 samples, 0.02%)</title><rect x="1096.4" y="149" width="0.2" height="15.0" fill="rgb(232,103,22)" rx="2" ry="2" />
+<text  x="1099.36" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.sysUnused (7 samples, 0.17%)</title><rect x="1138.8" y="245" width="2.0" height="15.0" fill="rgb(231,134,0)" rx="2" ry="2" />
+<text  x="1141.79" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (21 samples, 0.50%)</title><rect x="864.4" y="261" width="5.9" height="15.0" fill="rgb(244,217,52)" rx="2" ry="2" />
+<text  x="867.38" y="271.5" ></text>
+</g>
+<g >
+<title>sync.loadPoolChainElt (1 samples, 0.02%)</title><rect x="99.7" y="229" width="0.3" height="15.0" fill="rgb(236,38,6)" rx="2" ry="2" />
+<text  x="102.68" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="1118.7" y="261" width="0.3" height="15.0" fill="rgb(241,203,30)" rx="2" ry="2" />
+<text  x="1121.71" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (1 samples, 0.02%)</title><rect x="1118.7" y="245" width="0.3" height="15.0" fill="rgb(212,205,3)" rx="2" ry="2" />
+<text  x="1121.71" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*messageOpt).SelectCodecAndEncoder (8 samples, 0.19%)</title><rect x="1121.3" y="293" width="2.2" height="15.0" fill="rgb(210,42,37)" rx="2" ry="2" />
+<text  x="1124.25" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.signalM (2 samples, 0.05%)</title><rect x="1148.1" y="245" width="0.6" height="15.0" fill="rgb(240,126,39)" rx="2" ry="2" />
+<text  x="1151.13" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.callers (1 samples, 0.02%)</title><rect x="1104.6" y="197" width="0.2" height="15.0" fill="rgb(231,224,47)" rx="2" ry="2" />
+<text  x="1107.56" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).cacheSpan (1 samples, 0.02%)</title><rect x="867.2" y="197" width="0.3" height="15.0" fill="rgb(209,120,20)" rx="2" ry="2" />
+<text  x="870.20" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (2 samples, 0.05%)</title><rect x="962.8" y="213" width="0.6" height="15.0" fill="rgb(223,140,45)" rx="2" ry="2" />
+<text  x="965.83" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.pcvalue (1 samples, 0.02%)</title><rect x="908.5" y="85" width="0.3" height="15.0" fill="rgb(213,102,1)" rx="2" ry="2" />
+<text  x="911.51" y="95.5" ></text>
+</g>
+<g >
+<title>sync.(*poolDequeue).popHead (1 samples, 0.02%)</title><rect x="100.0" y="229" width="0.2" height="15.0" fill="rgb(205,183,4)" rx="2" ry="2" />
+<text  x="102.96" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1073.7" y="165" width="0.3" height="15.0" fill="rgb(210,61,50)" rx="2" ry="2" />
+<text  x="1076.73" y="175.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Engine).borrow (8 samples, 0.19%)</title><rect x="10.0" y="341" width="2.3" height="15.0" fill="rgb(221,137,17)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc.func1 (1 samples, 0.02%)</title><rect x="903.4" y="165" width="0.3" height="15.0" fill="rgb(228,217,22)" rx="2" ry="2" />
+<text  x="906.42" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.getitab (10 samples, 0.24%)</title><rect x="911.6" y="229" width="2.8" height="15.0" fill="rgb(206,85,48)" rx="2" ry="2" />
+<text  x="914.62" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1104.6" y="181" width="0.2" height="15.0" fill="rgb(231,14,12)" rx="2" ry="2" />
+<text  x="1107.56" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.markBits.isMarked (1 samples, 0.02%)</title><rect x="848.8" y="149" width="0.3" height="15.0" fill="rgb(254,135,2)" rx="2" ry="2" />
+<text  x="851.82" y="159.5" ></text>
+</g>
+<g >
+<title>github.com/rpcxio/rpcx-benchmark/proto.(*BenchmarkMessage).Size (19 samples, 0.46%)</title><rect x="884.5" y="229" width="5.3" height="15.0" fill="rgb(210,125,7)" rx="2" ry="2" />
+<text  x="887.46" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (1 samples, 0.02%)</title><rect x="984.3" y="213" width="0.3" height="15.0" fill="rgb(236,216,37)" rx="2" ry="2" />
+<text  x="987.33" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.duffzero (2 samples, 0.05%)</title><rect x="923.8" y="261" width="0.6" height="15.0" fill="rgb(234,136,21)" rx="2" ry="2" />
+<text  x="926.79" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.entersyscall (2 samples, 0.05%)</title><rect x="18.5" y="245" width="0.6" height="15.0" fill="rgb(245,17,24)" rx="2" ry="2" />
+<text  x="21.49" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (16 samples, 0.38%)</title><rect x="121.7" y="261" width="4.6" height="15.0" fill="rgb(249,128,5)" rx="2" ry="2" />
+<text  x="124.75" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).Reset (22 samples, 0.53%)</title><rect x="131.4" y="293" width="6.2" height="15.0" fill="rgb(252,129,17)" rx="2" ry="2" />
+<text  x="134.37" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (4 samples, 0.10%)</title><rect x="1062.4" y="197" width="1.1" height="15.0" fill="rgb(248,146,43)" rx="2" ry="2" />
+<text  x="1065.41" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.getMCache (1 samples, 0.02%)</title><rect x="982.3" y="213" width="0.3" height="15.0" fill="rgb(220,58,28)" rx="2" ry="2" />
+<text  x="985.35" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Range (16 samples, 0.38%)</title><rect x="849.9" y="229" width="4.6" height="15.0" fill="rgb(230,44,34)" rx="2" ry="2" />
+<text  x="852.95" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.funcspdelta (1 samples, 0.02%)</title><rect x="908.5" y="101" width="0.3" height="15.0" fill="rgb(238,152,25)" rx="2" ry="2" />
+<text  x="911.51" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.resetspinning (1 samples, 0.02%)</title><rect x="1188.9" y="309" width="0.3" height="15.0" fill="rgb(222,218,26)" rx="2" ry="2" />
+<text  x="1191.87" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (3 samples, 0.07%)</title><rect x="971.3" y="213" width="0.9" height="15.0" fill="rgb(212,104,44)" rx="2" ry="2" />
+<text  x="974.31" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).uncacheSpan (1 samples, 0.02%)</title><rect x="1072.6" y="149" width="0.3" height="15.0" fill="rgb(208,184,53)" rx="2" ry="2" />
+<text  x="1075.59" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.(*headTailIndex).incTail (1 samples, 0.02%)</title><rect x="111.3" y="149" width="0.3" height="15.0" fill="rgb(212,103,18)" rx="2" ry="2" />
+<text  x="114.28" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.newstack (1 samples, 0.02%)</title><rect x="97.7" y="261" width="0.3" height="15.0" fill="rgb(221,157,26)" rx="2" ry="2" />
+<text  x="100.70" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.exitsyscall0 (1 samples, 0.02%)</title><rect x="1173.3" y="341" width="0.3" height="15.0" fill="rgb(242,92,1)" rx="2" ry="2" />
+<text  x="1176.31" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (1 samples, 0.02%)</title><rect x="960.0" y="213" width="0.3" height="15.0" fill="rgb(213,133,10)" rx="2" ry="2" />
+<text  x="963.00" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.strhash (2 samples, 0.05%)</title><rect x="992.5" y="197" width="0.6" height="15.0" fill="rgb(239,22,22)" rx="2" ry="2" />
+<text  x="995.53" y="207.5" ></text>
+</g>
+<g >
+<title>reflect.Value.call (154 samples, 3.69%)</title><rect x="930.3" y="261" width="43.6" height="15.0" fill="rgb(252,194,51)" rx="2" ry="2" />
+<text  x="933.29" y="271.5" >refl..</text>
+</g>
+<g >
+<title>runtime.(*gcControllerState).update (1 samples, 0.02%)</title><rect x="1070.0" y="149" width="0.3" height="15.0" fill="rgb(222,108,52)" rx="2" ry="2" />
+<text  x="1073.05" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).init (1 samples, 0.02%)</title><rect x="902.9" y="85" width="0.2" height="15.0" fill="rgb(248,46,7)" rx="2" ry="2" />
+<text  x="905.85" y="95.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="903.4" y="181" width="0.3" height="15.0" fill="rgb(225,207,15)" rx="2" ry="2" />
+<text  x="906.42" y="191.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgparser.(*LMessageParser).handleAction (2 samples, 0.05%)</title><rect x="97.4" y="277" width="0.6" height="15.0" fill="rgb(227,192,12)" rx="2" ry="2" />
+<text  x="100.42" y="287.5" ></text>
+</g>
+<g >
+<title>sync.indexLocal (1 samples, 0.02%)</title><rect x="1106.5" y="245" width="0.3" height="15.0" fill="rgb(234,146,1)" rx="2" ry="2" />
+<text  x="1109.54" y="255.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).Put (11 samples, 0.26%)</title><rect x="85.8" y="277" width="3.1" height="15.0" fill="rgb(211,43,34)" rx="2" ry="2" />
+<text  x="88.82" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (84 samples, 2.01%)</title><rect x="1149.5" y="341" width="23.8" height="15.0" fill="rgb(245,57,54)" rx="2" ry="2" />
+<text  x="1152.54" y="351.5" >r..</text>
+</g>
+<g >
+<title>runtime.futex (2 samples, 0.05%)</title><rect x="1181.8" y="101" width="0.6" height="15.0" fill="rgb(248,76,53)" rx="2" ry="2" />
+<text  x="1184.80" y="111.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common.(*SharedPool).TakeBytesPool (7 samples, 0.17%)</title><rect x="143.0" y="277" width="1.9" height="15.0" fill="rgb(227,135,20)" rx="2" ry="2" />
+<text  x="145.97" y="287.5" ></text>
+</g>
+<g >
+<title>strconv.Itoa (21 samples, 0.50%)</title><rect x="979.0" y="277" width="5.9" height="15.0" fill="rgb(210,210,4)" rx="2" ry="2" />
+<text  x="981.95" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.unlockWithRank (2 samples, 0.05%)</title><rect x="1186.0" y="293" width="0.6" height="15.0" fill="rgb(248,207,54)" rx="2" ry="2" />
+<text  x="1189.04" y="303.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.UnmarshalFromMux (3 samples, 0.07%)</title><rect x="112.1" y="277" width="0.9" height="15.0" fill="rgb(241,117,37)" rx="2" ry="2" />
+<text  x="115.13" y="287.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).AppendPayloads (9 samples, 0.22%)</title><rect x="144.9" y="277" width="2.6" height="15.0" fill="rgb(240,134,18)" rx="2" ry="2" />
+<text  x="147.95" y="287.5" ></text>
+</g>
+<g >
+<title>reflect.memmove (3 samples, 0.07%)</title><rect x="959.4" y="229" width="0.9" height="15.0" fill="rgb(242,171,26)" rx="2" ry="2" />
+<text  x="962.43" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (9 samples, 0.22%)</title><rect x="118.6" y="277" width="2.6" height="15.0" fill="rgb(250,11,23)" rx="2" ry="2" />
+<text  x="121.64" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.nanotime (1 samples, 0.02%)</title><rect x="903.4" y="85" width="0.3" height="15.0" fill="rgb(227,68,0)" rx="2" ry="2" />
+<text  x="906.42" y="95.5" ></text>
+</g>
+<g >
+<title>runtime.casgstatus (5 samples, 0.12%)</title><rect x="1177.6" y="277" width="1.4" height="15.0" fill="rgb(215,196,20)" rx="2" ry="2" />
+<text  x="1180.55" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierBX (1 samples, 0.02%)</title><rect x="857.6" y="229" width="0.3" height="15.0" fill="rgb(214,52,10)" rx="2" ry="2" />
+<text  x="860.59" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.ResetMsg (4 samples, 0.10%)</title><rect x="147.8" y="261" width="1.1" height="15.0" fill="rgb(252,83,1)" rx="2" ry="2" />
+<text  x="150.78" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.markroot.func1 (1 samples, 0.02%)</title><rect x="903.4" y="101" width="0.3" height="15.0" fill="rgb(249,34,14)" rx="2" ry="2" />
+<text  x="906.42" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).base (1 samples, 0.02%)</title><rect x="924.4" y="245" width="0.2" height="15.0" fill="rgb(227,7,32)" rx="2" ry="2" />
+<text  x="927.35" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).cacheSpan (1 samples, 0.02%)</title><rect x="111.0" y="181" width="0.3" height="15.0" fill="rgb(209,110,9)" rx="2" ry="2" />
+<text  x="114.00" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (2 samples, 0.05%)</title><rect x="118.1" y="261" width="0.5" height="15.0" fill="rgb(230,150,38)" rx="2" ry="2" />
+<text  x="121.07" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1123.2" y="229" width="0.3" height="15.0" fill="rgb(227,154,29)" rx="2" ry="2" />
+<text  x="1126.23" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).GetCodecType (1 samples, 0.02%)</title><rect x="88.9" y="309" width="0.3" height="15.0" fill="rgb(238,186,27)" rx="2" ry="2" />
+<text  x="91.93" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc1 (1 samples, 0.02%)</title><rect x="1138.5" y="245" width="0.3" height="15.0" fill="rgb(232,168,16)" rx="2" ry="2" />
+<text  x="1141.51" y="255.5" ></text>
+</g>
+<g >
+<title>reflect.(*rtype).AssignableTo (5 samples, 0.12%)</title><rect x="946.7" y="245" width="1.4" height="15.0" fill="rgb(240,180,35)" rx="2" ry="2" />
+<text  x="949.70" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (4 samples, 0.10%)</title><rect x="866.9" y="213" width="1.2" height="15.0" fill="rgb(228,202,54)" rx="2" ry="2" />
+<text  x="869.92" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (1 samples, 0.02%)</title><rect x="137.3" y="213" width="0.3" height="15.0" fill="rgb(238,37,44)" rx="2" ry="2" />
+<text  x="140.31" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierSI (1 samples, 0.02%)</title><rect x="113.5" y="277" width="0.3" height="15.0" fill="rgb(251,118,24)" rx="2" ry="2" />
+<text  x="116.54" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (16 samples, 0.38%)</title><rect x="865.8" y="245" width="4.5" height="15.0" fill="rgb(214,123,27)" rx="2" ry="2" />
+<text  x="868.79" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (2 samples, 0.05%)</title><rect x="124.0" y="229" width="0.6" height="15.0" fill="rgb(253,116,10)" rx="2" ry="2" />
+<text  x="127.01" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.goready (2 samples, 0.05%)</title><rect x="1181.8" y="213" width="0.6" height="15.0" fill="rgb(238,159,27)" rx="2" ry="2" />
+<text  x="1184.80" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.preemptM (2 samples, 0.05%)</title><rect x="1148.1" y="261" width="0.6" height="15.0" fill="rgb(217,227,29)" rx="2" ry="2" />
+<text  x="1151.13" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (7 samples, 0.17%)</title><rect x="1090.7" y="213" width="2.0" height="15.0" fill="rgb(250,64,43)" rx="2" ry="2" />
+<text  x="1093.70" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*pluginManager).OnCallResult (4 samples, 0.10%)</title><rect x="922.1" y="277" width="1.1" height="15.0" fill="rgb(238,91,33)" rx="2" ry="2" />
+<text  x="925.09" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsForAddr (1 samples, 0.02%)</title><rect x="962.5" y="213" width="0.3" height="15.0" fill="rgb(254,119,38)" rx="2" ry="2" />
+<text  x="965.54" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.spanOf (1 samples, 0.02%)</title><rect x="965.7" y="149" width="0.2" height="15.0" fill="rgb(215,12,4)" rx="2" ry="2" />
+<text  x="968.66" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).nextFreeIndex (1 samples, 0.02%)</title><rect x="868.1" y="213" width="0.2" height="15.0" fill="rgb(248,113,53)" rx="2" ry="2" />
+<text  x="871.05" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (2 samples, 0.05%)</title><rect x="1103.7" y="229" width="0.6" height="15.0" fill="rgb(254,204,45)" rx="2" ry="2" />
+<text  x="1106.71" y="239.5" ></text>
+</g>
+<g >
+<title>sync.(*poolChain).popTail (2 samples, 0.05%)</title><rect x="99.1" y="229" width="0.6" height="15.0" fill="rgb(213,128,13)" rx="2" ry="2" />
+<text  x="102.12" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (3 samples, 0.07%)</title><rect x="1120.4" y="261" width="0.9" height="15.0" fill="rgb(220,220,12)" rx="2" ry="2" />
+<text  x="1123.41" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).SetMsgType (2 samples, 0.05%)</title><rect x="137.9" y="293" width="0.5" height="15.0" fill="rgb(250,112,53)" rx="2" ry="2" />
+<text  x="140.87" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (6 samples, 0.14%)</title><rect x="1111.4" y="261" width="1.6" height="15.0" fill="rgb(252,59,24)" rx="2" ry="2" />
+<text  x="1114.35" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc (1 samples, 0.02%)</title><rect x="1129.2" y="261" width="0.3" height="15.0" fill="rgb(209,200,2)" rx="2" ry="2" />
+<text  x="1132.18" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.futexsleep (1 samples, 0.02%)</title><rect x="1147.8" y="245" width="0.3" height="15.0" fill="rgb(235,33,46)" rx="2" ry="2" />
+<text  x="1150.85" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.scanobject (1 samples, 0.02%)</title><rect x="977.3" y="165" width="0.2" height="15.0" fill="rgb(234,69,15)" rx="2" ry="2" />
+<text  x="980.25" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc.func1 (1 samples, 0.02%)</title><rect x="1111.9" y="149" width="0.3" height="15.0" fill="rgb(241,174,31)" rx="2" ry="2" />
+<text  x="1114.92" y="159.5" ></text>
+</g>
+<g >
+<title>sync.(*Mutex).Unlock (1 samples, 0.02%)</title><rect x="859.6" y="197" width="0.2" height="15.0" fill="rgb(208,170,10)" rx="2" ry="2" />
+<text  x="862.57" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc.func1 (1 samples, 0.02%)</title><rect x="1103.4" y="133" width="0.3" height="15.0" fill="rgb(209,205,17)" rx="2" ry="2" />
+<text  x="1106.43" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.findObject (3 samples, 0.07%)</title><rect x="1043.5" y="133" width="0.8" height="15.0" fill="rgb(230,63,2)" rx="2" ry="2" />
+<text  x="1046.45" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 0.02%)</title><rect x="1147.3" y="229" width="0.3" height="15.0" fill="rgb(230,172,37)" rx="2" ry="2" />
+<text  x="1150.28" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/plugins/metrics.(*ServerMetricsPlugin).OnCallResult (1 samples, 0.02%)</title><rect x="922.7" y="261" width="0.2" height="15.0" fill="rgb(254,115,30)" rx="2" ry="2" />
+<text  x="925.65" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.efaceeq (6 samples, 0.14%)</title><rect x="989.1" y="213" width="1.7" height="15.0" fill="rgb(252,40,10)" rx="2" ry="2" />
+<text  x="992.14" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (5 samples, 0.12%)</title><rect x="1070.3" y="101" width="1.4" height="15.0" fill="rgb(231,101,39)" rx="2" ry="2" />
+<text  x="1073.33" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (1 samples, 0.02%)</title><rect x="1138.2" y="309" width="0.3" height="15.0" fill="rgb(240,164,15)" rx="2" ry="2" />
+<text  x="1141.23" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsForAddr (1 samples, 0.02%)</title><rect x="124.6" y="165" width="0.3" height="15.0" fill="rgb(220,54,37)" rx="2" ry="2" />
+<text  x="127.58" y="175.5" ></text>
+</g>
+<g >
+<title>sync.runtime_procUnpin (1 samples, 0.02%)</title><rect x="100.2" y="245" width="0.3" height="15.0" fill="rgb(226,95,1)" rx="2" ry="2" />
+<text  x="103.25" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (2 samples, 0.05%)</title><rect x="1128.6" y="245" width="0.6" height="15.0" fill="rgb(218,99,38)" rx="2" ry="2" />
+<text  x="1131.61" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (1 samples, 0.02%)</title><rect x="1113.0" y="261" width="0.3" height="15.0" fill="rgb(232,188,26)" rx="2" ry="2" />
+<text  x="1116.05" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.findObject (1 samples, 0.02%)</title><rect x="925.5" y="165" width="0.3" height="15.0" fill="rgb(244,137,54)" rx="2" ry="2" />
+<text  x="928.48" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.assertE2I (3 samples, 0.07%)</title><rect x="974.1" y="277" width="0.9" height="15.0" fill="rgb(245,146,47)" rx="2" ry="2" />
+<text  x="977.14" y="287.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/internal/reflect.ToValueTypeEface (3 samples, 0.07%)</title><rect x="918.1" y="261" width="0.9" height="15.0" fill="rgb(245,8,24)" rx="2" ry="2" />
+<text  x="921.13" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Len (1 samples, 0.02%)</title><rect x="1088.4" y="229" width="0.3" height="15.0" fill="rgb(212,203,28)" rx="2" ry="2" />
+<text  x="1091.44" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (2 samples, 0.05%)</title><rect x="962.0" y="213" width="0.5" height="15.0" fill="rgb(230,215,13)" rx="2" ry="2" />
+<text  x="964.98" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc (1 samples, 0.02%)</title><rect x="124.3" y="181" width="0.3" height="15.0" fill="rgb(207,59,46)" rx="2" ry="2" />
+<text  x="127.29" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (2 samples, 0.05%)</title><rect x="925.2" y="229" width="0.6" height="15.0" fill="rgb(226,23,7)" rx="2" ry="2" />
+<text  x="928.20" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.sysUnusedOS (7 samples, 0.17%)</title><rect x="1138.8" y="229" width="2.0" height="15.0" fill="rgb(221,111,43)" rx="2" ry="2" />
+<text  x="1141.79" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Reset (1 samples, 0.02%)</title><rect x="1087.9" y="261" width="0.3" height="15.0" fill="rgb(227,90,0)" rx="2" ry="2" />
+<text  x="1090.87" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 0.02%)</title><rect x="1147.6" y="245" width="0.2" height="15.0" fill="rgb(219,163,16)" rx="2" ry="2" />
+<text  x="1150.56" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.procyield (2 samples, 0.05%)</title><rect x="1156.6" y="245" width="0.6" height="15.0" fill="rgb(243,39,40)" rx="2" ry="2" />
+<text  x="1159.62" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.scanstack (1 samples, 0.02%)</title><rect x="1156.3" y="261" width="0.3" height="15.0" fill="rgb(242,209,7)" rx="2" ry="2" />
+<text  x="1159.33" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.(*scavengerState).run (7 samples, 0.17%)</title><rect x="1138.8" y="341" width="2.0" height="15.0" fill="rgb(247,148,29)" rx="2" ry="2" />
+<text  x="1141.79" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.notetsleep (1 samples, 0.02%)</title><rect x="1147.8" y="277" width="0.3" height="15.0" fill="rgb(229,142,37)" rx="2" ry="2" />
+<text  x="1150.85" y="287.5" ></text>
+</g>
+<g >
+<title>reflect.(*rtype).In (1 samples, 0.02%)</title><rect x="948.1" y="245" width="0.3" height="15.0" fill="rgb(213,29,43)" rx="2" ry="2" />
+<text  x="951.12" y="255.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).pin (2 samples, 0.05%)</title><rect x="86.4" y="261" width="0.6" height="15.0" fill="rgb(232,97,54)" rx="2" ry="2" />
+<text  x="89.38" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.pcvalue (2 samples, 0.05%)</title><rect x="1075.1" y="69" width="0.6" height="15.0" fill="rgb(233,161,44)" rx="2" ry="2" />
+<text  x="1078.14" y="79.5" ></text>
+</g>
+<g >
+<title>runtime.mProf_Malloc (3 samples, 0.07%)</title><rect x="908.2" y="181" width="0.9" height="15.0" fill="rgb(214,194,37)" rx="2" ry="2" />
+<text  x="911.23" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (1 samples, 0.02%)</title><rect x="137.3" y="197" width="0.3" height="15.0" fill="rgb(233,141,40)" rx="2" ry="2" />
+<text  x="140.31" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.getMCache (1 samples, 0.02%)</title><rect x="961.1" y="229" width="0.3" height="15.0" fill="rgb(206,7,34)" rx="2" ry="2" />
+<text  x="964.13" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (1 samples, 0.02%)</title><rect x="962.0" y="197" width="0.3" height="15.0" fill="rgb(227,188,30)" rx="2" ry="2" />
+<text  x="964.98" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (2 samples, 0.05%)</title><rect x="965.4" y="229" width="0.5" height="15.0" fill="rgb(216,95,33)" rx="2" ry="2" />
+<text  x="968.37" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).cacheSpan (1 samples, 0.02%)</title><rect x="1111.9" y="213" width="0.3" height="15.0" fill="rgb(227,70,42)" rx="2" ry="2" />
+<text  x="1114.92" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (4 samples, 0.10%)</title><rect x="1098.6" y="213" width="1.2" height="15.0" fill="rgb(252,47,32)" rx="2" ry="2" />
+<text  x="1101.62" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.goroutineReady (2 samples, 0.05%)</title><rect x="1181.8" y="229" width="0.6" height="15.0" fill="rgb(236,226,33)" rx="2" ry="2" />
+<text  x="1184.80" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1103.4" y="149" width="0.3" height="15.0" fill="rgb(241,24,27)" rx="2" ry="2" />
+<text  x="1106.43" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).refillAllocCache (1 samples, 0.02%)</title><rect x="1096.9" y="181" width="0.3" height="15.0" fill="rgb(205,13,18)" rx="2" ry="2" />
+<text  x="1099.92" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (2 samples, 0.05%)</title><rect x="1111.6" y="229" width="0.6" height="15.0" fill="rgb(210,40,50)" rx="2" ry="2" />
+<text  x="1114.64" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*spanSet).push (1 samples, 0.02%)</title><rect x="1128.9" y="213" width="0.3" height="15.0" fill="rgb(241,110,40)" rx="2" ry="2" />
+<text  x="1131.89" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.gentraceback (1 samples, 0.02%)</title><rect x="1104.6" y="149" width="0.2" height="15.0" fill="rgb(222,93,33)" rx="2" ry="2" />
+<text  x="1107.56" y="159.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container.__append[...] (4 samples, 0.10%)</title><rect x="919.5" y="261" width="1.2" height="15.0" fill="rgb(244,21,47)" rx="2" ry="2" />
+<text  x="922.54" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.procPin (1 samples, 0.02%)</title><rect x="86.7" y="245" width="0.3" height="15.0" fill="rgb(219,1,1)" rx="2" ry="2" />
+<text  x="89.67" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (7 samples, 0.17%)</title><rect x="1042.6" y="149" width="2.0" height="15.0" fill="rgb(223,202,35)" rx="2" ry="2" />
+<text  x="1045.61" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.freedefer (1 samples, 0.02%)</title><rect x="113.0" y="277" width="0.3" height="15.0" fill="rgb(227,6,15)" rx="2" ry="2" />
+<text  x="115.98" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.wakep (1 samples, 0.02%)</title><rect x="1147.3" y="261" width="0.3" height="15.0" fill="rgb(205,50,24)" rx="2" ry="2" />
+<text  x="1150.28" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (2 samples, 0.05%)</title><rect x="111.0" y="197" width="0.6" height="15.0" fill="rgb(250,167,9)" rx="2" ry="2" />
+<text  x="114.00" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 0.02%)</title><rect x="903.7" y="117" width="0.3" height="15.0" fill="rgb(231,167,3)" rx="2" ry="2" />
+<text  x="906.70" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc.func1 (7 samples, 0.17%)</title><rect x="901.2" y="101" width="1.9" height="15.0" fill="rgb(220,22,51)" rx="2" ry="2" />
+<text  x="904.15" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (4 samples, 0.10%)</title><rect x="1144.5" y="293" width="1.1" height="15.0" fill="rgb(244,79,35)" rx="2" ry="2" />
+<text  x="1147.45" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).uncacheSpan (1 samples, 0.02%)</title><rect x="903.1" y="165" width="0.3" height="15.0" fill="rgb(222,41,17)" rx="2" ry="2" />
+<text  x="906.13" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.funcInfo.entry (1 samples, 0.02%)</title><rect x="908.8" y="85" width="0.3" height="15.0" fill="rgb(225,64,47)" rx="2" ry="2" />
+<text  x="911.79" y="95.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (1 samples, 0.02%)</title><rect x="965.9" y="181" width="0.3" height="15.0" fill="rgb(249,194,43)" rx="2" ry="2" />
+<text  x="968.94" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.acquirem (4 samples, 0.10%)</title><rect x="1049.1" y="197" width="1.1" height="15.0" fill="rgb(241,79,36)" rx="2" ry="2" />
+<text  x="1052.11" y="207.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).GetInstanceName (1 samples, 0.02%)</title><rect x="842.6" y="245" width="0.3" height="15.0" fill="rgb(208,164,3)" rx="2" ry="2" />
+<text  x="845.59" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.casgstatus (1 samples, 0.02%)</title><rect x="1173.3" y="325" width="0.3" height="15.0" fill="rgb(250,63,30)" rx="2" ry="2" />
+<text  x="1176.31" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.step (2 samples, 0.05%)</title><rect x="1075.1" y="53" width="0.6" height="15.0" fill="rgb(233,93,42)" rx="2" ry="2" />
+<text  x="1078.14" y="63.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Len (1 samples, 0.02%)</title><rect x="1089.0" y="245" width="0.3" height="15.0" fill="rgb(234,93,38)" rx="2" ry="2" />
+<text  x="1092.00" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (42 samples, 1.01%)</title><rect x="1050.5" y="197" width="11.9" height="15.0" fill="rgb(237,125,46)" rx="2" ry="2" />
+<text  x="1053.53" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.convI2I (6 samples, 0.14%)</title><rect x="840.0" y="229" width="1.7" height="15.0" fill="rgb(220,108,37)" rx="2" ry="2" />
+<text  x="843.05" y="239.5" ></text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (2,359 samples, 56.56%)</title><rect x="171.5" y="133" width="667.4" height="15.0" fill="rgb(243,60,34)" rx="2" ry="2" />
+<text  x="174.54" y="143.5" >syscall.RawSyscall6</text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc (1 samples, 0.02%)</title><rect x="903.4" y="197" width="0.3" height="15.0" fill="rgb(213,7,17)" rx="2" ry="2" />
+<text  x="906.42" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).grow (1 samples, 0.02%)</title><rect x="867.2" y="181" width="0.3" height="15.0" fill="rgb(210,158,37)" rx="2" ry="2" />
+<text  x="870.20" y="191.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*Server).encodeAndSendMsg (2,542 samples, 60.94%)</title><rect x="151.2" y="277" width="719.1" height="15.0" fill="rgb(218,31,37)" rx="2" ry="2" />
+<text  x="154.17" y="287.5" >github.com/nyan233/littlerpc/server.(*Server).encodeAndSendMsg</text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 0.02%)</title><rect x="1096.4" y="133" width="0.2" height="15.0" fill="rgb(231,97,25)" rx="2" ry="2" />
+<text  x="1099.36" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (8 samples, 0.19%)</title><rect x="1119.0" y="277" width="2.3" height="15.0" fill="rgb(213,12,10)" rx="2" ry="2" />
+<text  x="1121.99" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.reflectcallmove (5 samples, 0.12%)</title><rect x="942.2" y="229" width="1.4" height="15.0" fill="rgb(246,133,6)" rx="2" ry="2" />
+<text  x="945.17" y="239.5" ></text>
+</g>
+<g >
+<title>syscall.EpollWait (8 samples, 0.19%)</title><rect x="1135.7" y="325" width="2.2" height="15.0" fill="rgb(231,183,50)" rx="2" ry="2" />
+<text  x="1138.68" y="335.5" ></text>
+</g>
+<g >
+<title>reflect.Value.IsNil (6 samples, 0.14%)</title><rect x="914.4" y="261" width="1.7" height="15.0" fill="rgb(228,126,12)" rx="2" ry="2" />
+<text  x="917.45" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).PayloadsIterator (42 samples, 1.01%)</title><rect x="1088.7" y="261" width="11.9" height="15.0" fill="rgb(234,160,47)" rx="2" ry="2" />
+<text  x="1091.72" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (2 samples, 0.05%)</title><rect x="126.3" y="261" width="0.5" height="15.0" fill="rgb(243,126,54)" rx="2" ry="2" />
+<text  x="129.27" y="271.5" ></text>
+</g>
+<g >
+<title>encoding/binary.bigEndian.Uint32 (2 samples, 0.05%)</title><rect x="101.1" y="261" width="0.6" height="15.0" fill="rgb(211,80,40)" rx="2" ry="2" />
+<text  x="104.10" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsForAddr (1 samples, 0.02%)</title><rect x="1138.5" y="213" width="0.3" height="15.0" fill="rgb(205,41,29)" rx="2" ry="2" />
+<text  x="1141.51" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.findRunnable (24 samples, 0.58%)</title><rect x="1179.0" y="293" width="6.8" height="15.0" fill="rgb(246,188,25)" rx="2" ry="2" />
+<text  x="1181.97" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="903.7" y="181" width="0.3" height="15.0" fill="rgb(214,31,35)" rx="2" ry="2" />
+<text  x="906.70" y="191.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.safeIndexCodecWps (3 samples, 0.07%)</title><rect x="1123.5" y="293" width="0.9" height="15.0" fill="rgb(240,71,35)" rx="2" ry="2" />
+<text  x="1126.52" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 0.02%)</title><rect x="1071.7" y="101" width="0.3" height="15.0" fill="rgb(243,125,38)" rx="2" ry="2" />
+<text  x="1074.75" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.madvise (7 samples, 0.17%)</title><rect x="1138.8" y="213" width="2.0" height="15.0" fill="rgb(219,150,8)" rx="2" ry="2" />
+<text  x="1141.79" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.assertE2I2 (10 samples, 0.24%)</title><rect x="911.6" y="245" width="2.8" height="15.0" fill="rgb(214,58,5)" rx="2" ry="2" />
+<text  x="914.62" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container.NewIterator[...] (15 samples, 0.36%)</title><rect x="1089.3" y="245" width="4.2" height="15.0" fill="rgb(235,209,5)" rx="2" ry="2" />
+<text  x="1092.29" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.startm (1 samples, 0.02%)</title><rect x="1147.6" y="261" width="0.2" height="15.0" fill="rgb(209,8,46)" rx="2" ry="2" />
+<text  x="1150.56" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.slicebytetostring (13 samples, 0.31%)</title><rect x="981.2" y="229" width="3.7" height="15.0" fill="rgb(222,106,4)" rx="2" ry="2" />
+<text  x="984.22" y="239.5" ></text>
+</g>
+<g >
+<title>internal/abi.(*IntArgRegBitmap).Get (3 samples, 0.07%)</title><rect x="941.3" y="229" width="0.9" height="15.0" fill="rgb(223,175,35)" rx="2" ry="2" />
+<text  x="944.33" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (8 samples, 0.19%)</title><rect x="1133.4" y="277" width="2.3" height="15.0" fill="rgb(242,134,17)" rx="2" ry="2" />
+<text  x="1136.42" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.runtimer (2 samples, 0.05%)</title><rect x="1181.8" y="261" width="0.6" height="15.0" fill="rgb(230,12,0)" rx="2" ry="2" />
+<text  x="1184.80" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).setSpans (1 samples, 0.02%)</title><rect x="1071.2" y="53" width="0.3" height="15.0" fill="rgb(246,62,25)" rx="2" ry="2" />
+<text  x="1074.18" y="63.5" ></text>
+</g>
+<g >
+<title>runtime.findObject (1 samples, 0.02%)</title><rect x="965.4" y="149" width="0.3" height="15.0" fill="rgb(236,1,42)" rx="2" ry="2" />
+<text  x="968.37" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.markroot.func1 (3 samples, 0.07%)</title><rect x="1156.3" y="277" width="0.9" height="15.0" fill="rgb(220,138,29)" rx="2" ry="2" />
+<text  x="1159.33" y="287.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Store (2 samples, 0.05%)</title><rect x="919.0" y="261" width="0.5" height="15.0" fill="rgb(211,77,38)" rx="2" ry="2" />
+<text  x="921.98" y="271.5" ></text>
+</g>
+<g >
+<title>reflect.valueInterface (1 samples, 0.02%)</title><rect x="973.9" y="261" width="0.2" height="15.0" fill="rgb(222,152,51)" rx="2" ry="2" />
+<text  x="976.86" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.heapBits.next (8 samples, 0.19%)</title><rect x="1154.1" y="293" width="2.2" height="15.0" fill="rgb(227,181,13)" rx="2" ry="2" />
+<text  x="1157.07" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierCX (1 samples, 0.02%)</title><rect x="946.1" y="229" width="0.3" height="15.0" fill="rgb(206,123,38)" rx="2" ry="2" />
+<text  x="949.14" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.mProf_Malloc (1 samples, 0.02%)</title><rect x="1104.6" y="213" width="0.2" height="15.0" fill="rgb(222,120,30)" rx="2" ry="2" />
+<text  x="1107.56" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (7 samples, 0.17%)</title><rect x="961.4" y="229" width="2.0" height="15.0" fill="rgb(235,110,16)" rx="2" ry="2" />
+<text  x="964.41" y="239.5" ></text>
+</g>
+<g >
+<title>reflect.funcLayout (26 samples, 0.62%)</title><rect x="951.8" y="245" width="7.3" height="15.0" fill="rgb(218,79,46)" rx="2" ry="2" />
+<text  x="954.79" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.futex (3 samples, 0.07%)</title><rect x="1148.7" y="245" width="0.8" height="15.0" fill="rgb(231,90,14)" rx="2" ry="2" />
+<text  x="1151.70" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (31 samples, 0.74%)</title><rect x="1066.9" y="197" width="8.8" height="15.0" fill="rgb(220,53,10)" rx="2" ry="2" />
+<text  x="1069.94" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (2 samples, 0.05%)</title><rect x="965.4" y="165" width="0.5" height="15.0" fill="rgb(241,97,15)" rx="2" ry="2" />
+<text  x="968.37" y="175.5" ></text>
+</g>
+<g >
+<title>reflect.Value.NumMethod (5 samples, 0.12%)</title><rect x="920.7" y="229" width="1.4" height="15.0" fill="rgb(205,208,20)" rx="2" ry="2" />
+<text  x="923.67" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).allocNeedsZero (2 samples, 0.05%)</title><rect x="902.3" y="69" width="0.6" height="15.0" fill="rgb(207,110,23)" rx="2" ry="2" />
+<text  x="905.28" y="79.5" ></text>
+</g>
+<g >
+<title>aeshashbody (3 samples, 0.07%)</title><rect x="991.7" y="197" width="0.8" height="15.0" fill="rgb(208,23,12)" rx="2" ry="2" />
+<text  x="994.68" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).grow (7 samples, 0.17%)</title><rect x="901.2" y="149" width="1.9" height="15.0" fill="rgb(221,177,28)" rx="2" ry="2" />
+<text  x="904.15" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (2 samples, 0.05%)</title><rect x="1061.0" y="165" width="0.6" height="15.0" fill="rgb(222,6,9)" rx="2" ry="2" />
+<text  x="1063.99" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.(*pageAlloc).update (1 samples, 0.02%)</title><rect x="1144.7" y="229" width="0.3" height="15.0" fill="rgb(231,43,37)" rx="2" ry="2" />
+<text  x="1147.74" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.suspendG (2 samples, 0.05%)</title><rect x="1156.6" y="261" width="0.6" height="15.0" fill="rgb(229,206,29)" rx="2" ry="2" />
+<text  x="1159.62" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (11 samples, 0.26%)</title><rect x="1101.7" y="245" width="3.1" height="15.0" fill="rgb(206,20,3)" rx="2" ry="2" />
+<text  x="1104.73" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.gcmarknewobject (1 samples, 0.02%)</title><rect x="1061.6" y="181" width="0.2" height="15.0" fill="rgb(220,6,29)" rx="2" ry="2" />
+<text  x="1064.56" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.(*itabTableType).find (7 samples, 0.17%)</title><rect x="912.5" y="213" width="1.9" height="15.0" fill="rgb(220,0,13)" rx="2" ry="2" />
+<text  x="915.47" y="223.5" ></text>
+</g>
+<g >
+<title>reflect.directlyAssignable (1 samples, 0.02%)</title><rect x="951.5" y="229" width="0.3" height="15.0" fill="rgb(227,25,35)" rx="2" ry="2" />
+<text  x="954.51" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*fixalloc).alloc (2 samples, 0.05%)</title><rect x="1070.6" y="37" width="0.6" height="15.0" fill="rgb(233,132,8)" rx="2" ry="2" />
+<text  x="1073.61" y="47.5" ></text>
+</g>
+<g >
+<title>runtime.findfunc (1 samples, 0.02%)</title><rect x="1074.9" y="85" width="0.2" height="15.0" fill="rgb(254,86,35)" rx="2" ry="2" />
+<text  x="1077.86" y="95.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (1 samples, 0.02%)</title><rect x="984.0" y="213" width="0.3" height="15.0" fill="rgb(243,117,0)" rx="2" ry="2" />
+<text  x="987.04" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (2 samples, 0.05%)</title><rect x="124.0" y="245" width="0.6" height="15.0" fill="rgb(209,18,22)" rx="2" ry="2" />
+<text  x="127.01" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.step (1 samples, 0.02%)</title><rect x="908.5" y="69" width="0.3" height="15.0" fill="rgb(226,142,28)" rx="2" ry="2" />
+<text  x="911.51" y="79.5" ></text>
+</g>
+<g >
+<title>runtime.(*pageAlloc).free (1 samples, 0.02%)</title><rect x="1144.7" y="245" width="0.3" height="15.0" fill="rgb(254,133,36)" rx="2" ry="2" />
+<text  x="1147.74" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*consistentHeapStats).acquire (1 samples, 0.02%)</title><rect x="1128.6" y="229" width="0.3" height="15.0" fill="rgb(235,84,44)" rx="2" ry="2" />
+<text  x="1131.61" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.mapaccess2 (7 samples, 0.17%)</title><rect x="956.3" y="213" width="2.0" height="15.0" fill="rgb(208,120,9)" rx="2" ry="2" />
+<text  x="959.32" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.nanotime (8 samples, 0.19%)</title><rect x="1182.6" y="277" width="2.3" height="15.0" fill="rgb(212,29,12)" rx="2" ry="2" />
+<text  x="1185.64" y="287.5" ></text>
+</g>
+<g >
+<title>main.(*Hello).Say (9 samples, 0.22%)</title><rect x="943.9" y="245" width="2.5" height="15.0" fill="rgb(225,57,49)" rx="2" ry="2" />
+<text  x="946.87" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).refillAllocCache (1 samples, 0.02%)</title><rect x="1073.4" y="149" width="0.3" height="15.0" fill="rgb(214,97,38)" rx="2" ry="2" />
+<text  x="1076.44" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.casgstatus (1 samples, 0.02%)</title><rect x="18.8" y="213" width="0.3" height="15.0" fill="rgb(221,177,48)" rx="2" ry="2" />
+<text  x="21.77" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.getitab (3 samples, 0.07%)</title><rect x="840.9" y="213" width="0.8" height="15.0" fill="rgb(245,63,23)" rx="2" ry="2" />
+<text  x="843.89" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.duffzero (4 samples, 0.10%)</title><rect x="964.2" y="245" width="1.2" height="15.0" fill="rgb(224,100,17)" rx="2" ry="2" />
+<text  x="967.24" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.wirep (1 samples, 0.02%)</title><rect x="19.9" y="213" width="0.3" height="15.0" fill="rgb(216,28,10)" rx="2" ry="2" />
+<text  x="22.90" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (5 samples, 0.12%)</title><rect x="972.2" y="229" width="1.4" height="15.0" fill="rgb(241,118,17)" rx="2" ry="2" />
+<text  x="975.16" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.callers (5 samples, 0.12%)</title><rect x="1074.3" y="149" width="1.4" height="15.0" fill="rgb(249,198,53)" rx="2" ry="2" />
+<text  x="1077.29" y="159.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).SetEncoderType (1 samples, 0.02%)</title><rect x="137.6" y="293" width="0.3" height="15.0" fill="rgb(246,108,53)" rx="2" ry="2" />
+<text  x="140.59" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.execute (9 samples, 0.22%)</title><rect x="1176.4" y="293" width="2.6" height="15.0" fill="rgb(208,92,50)" rx="2" ry="2" />
+<text  x="1179.42" y="303.5" ></text>
+</g>
+<g >
+<title>reflect.(*rtype).NumIn (1 samples, 0.02%)</title><rect x="1101.2" y="261" width="0.3" height="15.0" fill="rgb(208,206,6)" rx="2" ry="2" />
+<text  x="1104.17" y="271.5" ></text>
+</g>
+<g >
+<title>syscall.Read (231 samples, 5.54%)</title><rect x="17.9" y="293" width="65.4" height="15.0" fill="rgb(246,176,25)" rx="2" ry="2" />
+<text  x="20.92" y="303.5" >syscall..</text>
+</g>
+<g >
+<title>runtime.(*mspan).nextFreeIndex (2 samples, 0.05%)</title><rect x="1073.2" y="165" width="0.5" height="15.0" fill="rgb(210,25,20)" rx="2" ry="2" />
+<text  x="1076.16" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (1 samples, 0.02%)</title><rect x="977.8" y="245" width="0.3" height="15.0" fill="rgb(253,103,22)" rx="2" ry="2" />
+<text  x="980.82" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (16 samples, 0.38%)</title><rect x="1075.7" y="197" width="4.5" height="15.0" fill="rgb(234,9,28)" rx="2" ry="2" />
+<text  x="1078.71" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1097.5" y="197" width="0.3" height="15.0" fill="rgb(213,158,13)" rx="2" ry="2" />
+<text  x="1100.49" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*spanSet).push (1 samples, 0.02%)</title><rect x="111.3" y="165" width="0.3" height="15.0" fill="rgb(236,205,50)" rx="2" ry="2" />
+<text  x="114.28" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsForAddr (1 samples, 0.02%)</title><rect x="868.6" y="229" width="0.3" height="15.0" fill="rgb(209,120,6)" rx="2" ry="2" />
+<text  x="871.62" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.goready (1 samples, 0.02%)</title><rect x="859.6" y="117" width="0.2" height="15.0" fill="rgb(254,30,22)" rx="2" ry="2" />
+<text  x="862.57" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.lockWithRank (1 samples, 0.02%)</title><rect x="1140.8" y="341" width="0.3" height="15.0" fill="rgb(246,159,27)" rx="2" ry="2" />
+<text  x="1143.77" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (5 samples, 0.12%)</title><rect x="1074.3" y="133" width="1.4" height="15.0" fill="rgb(243,139,14)" rx="2" ry="2" />
+<text  x="1077.29" y="143.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).Put (8 samples, 0.19%)</title><rect x="148.9" y="261" width="2.3" height="15.0" fill="rgb(223,90,45)" rx="2" ry="2" />
+<text  x="151.91" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/rpcxio/rpcx-benchmark/proto.(*BenchmarkMessage).Marshal (136 samples, 3.26%)</title><rect x="873.1" y="245" width="38.5" height="15.0" fill="rgb(223,90,39)" rx="2" ry="2" />
+<text  x="876.15" y="255.5" >git..</text>
+</g>
+<g >
+<title>runtime.typedmemclr (5 samples, 0.12%)</title><rect x="924.4" y="261" width="1.4" height="15.0" fill="rgb(244,154,47)" rx="2" ry="2" />
+<text  x="927.35" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc.func1 (1 samples, 0.02%)</title><rect x="867.2" y="133" width="0.3" height="15.0" fill="rgb(250,220,26)" rx="2" ry="2" />
+<text  x="870.20" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.(*sweepLocked).sweep (10 samples, 0.24%)</title><rect x="1143.0" y="325" width="2.9" height="15.0" fill="rgb(205,39,32)" rx="2" ry="2" />
+<text  x="1146.04" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (2 samples, 0.05%)</title><rect x="111.0" y="213" width="0.6" height="15.0" fill="rgb(240,143,7)" rx="2" ry="2" />
+<text  x="114.00" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).divideByElemSize (1 samples, 0.02%)</title><rect x="150.9" y="117" width="0.3" height="15.0" fill="rgb(223,44,8)" rx="2" ry="2" />
+<text  x="153.89" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc1 (1 samples, 0.02%)</title><rect x="124.6" y="197" width="0.3" height="15.0" fill="rgb(226,194,24)" rx="2" ry="2" />
+<text  x="127.58" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (2 samples, 0.05%)</title><rect x="1119.8" y="245" width="0.6" height="15.0" fill="rgb(237,180,36)" rx="2" ry="2" />
+<text  x="1122.84" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.callers.func1 (3 samples, 0.07%)</title><rect x="908.2" y="133" width="0.9" height="15.0" fill="rgb(254,1,37)" rx="2" ry="2" />
+<text  x="911.23" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.funcspdelta (2 samples, 0.05%)</title><rect x="1075.1" y="85" width="0.6" height="15.0" fill="rgb(215,42,43)" rx="2" ry="2" />
+<text  x="1078.14" y="95.5" ></text>
+</g>
+<g >
+<title>sync.(*poolDequeue).pushHead (3 samples, 0.07%)</title><rect x="88.1" y="245" width="0.8" height="15.0" fill="rgb(223,1,36)" rx="2" ry="2" />
+<text  x="91.08" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/transport.(*NBioTcpEngine).Start.func2 (3,719 samples, 89.16%)</title><rect x="83.6" y="325" width="1052.1" height="15.0" fill="rgb(250,214,21)" rx="2" ry="2" />
+<text  x="86.56" y="335.5" >github.com/nyan233/littlerpc/pkg/common/transport.(*NBioTcpEngine).Start.func2</text>
+</g>
+<g >
+<title>runtime.(*pageAlloc).scavengeOne (7 samples, 0.17%)</title><rect x="1138.8" y="261" width="2.0" height="15.0" fill="rgb(238,219,41)" rx="2" ry="2" />
+<text  x="1141.79" y="271.5" ></text>
+</g>
+<g >
+<title>callRet (9 samples, 0.22%)</title><rect x="941.0" y="245" width="2.6" height="15.0" fill="rgb(225,131,52)" rx="2" ry="2" />
+<text  x="944.04" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).nextFreeIndex (1 samples, 0.02%)</title><rect x="962.3" y="197" width="0.2" height="15.0" fill="rgb(240,61,37)" rx="2" ry="2" />
+<text  x="965.26" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).objIndex (1 samples, 0.02%)</title><rect x="1097.2" y="213" width="0.3" height="15.0" fill="rgb(206,190,1)" rx="2" ry="2" />
+<text  x="1100.21" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (3 samples, 0.07%)</title><rect x="1148.7" y="261" width="0.8" height="15.0" fill="rgb(252,27,41)" rx="2" ry="2" />
+<text  x="1151.70" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.wakep (1 samples, 0.02%)</title><rect x="1188.9" y="293" width="0.3" height="15.0" fill="rgb(221,209,45)" rx="2" ry="2" />
+<text  x="1191.87" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (2 samples, 0.05%)</title><rect x="925.2" y="181" width="0.6" height="15.0" fill="rgb(240,223,38)" rx="2" ry="2" />
+<text  x="928.20" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (1 samples, 0.02%)</title><rect x="863.5" y="197" width="0.3" height="15.0" fill="rgb(216,194,42)" rx="2" ry="2" />
+<text  x="866.53" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc (5 samples, 0.12%)</title><rect x="1070.3" y="117" width="1.4" height="15.0" fill="rgb(247,198,26)" rx="2" ry="2" />
+<text  x="1073.33" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.readyWithTime (1 samples, 0.02%)</title><rect x="859.6" y="133" width="0.2" height="15.0" fill="rgb(220,19,22)" rx="2" ry="2" />
+<text  x="862.57" y="143.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Next (1 samples, 0.02%)</title><rect x="1087.6" y="261" width="0.3" height="15.0" fill="rgb(219,137,0)" rx="2" ry="2" />
+<text  x="1090.59" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.assertI2I2 (1 samples, 0.02%)</title><rect x="16.8" y="309" width="0.3" height="15.0" fill="rgb(211,146,42)" rx="2" ry="2" />
+<text  x="19.79" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.gentraceback (1 samples, 0.02%)</title><rect x="1156.3" y="245" width="0.3" height="15.0" fill="rgb(248,182,9)" rx="2" ry="2" />
+<text  x="1159.33" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.findObject (1 samples, 0.02%)</title><rect x="863.5" y="181" width="0.3" height="15.0" fill="rgb(244,176,18)" rx="2" ry="2" />
+<text  x="866.53" y="191.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*messageOpt).checkCallArgs (401 samples, 9.61%)</title><rect x="993.4" y="277" width="113.4" height="15.0" fill="rgb(247,137,12)" rx="2" ry="2" />
+<text  x="996.38" y="287.5" >github.com/nya..</text>
+</g>
+<g >
+<title>runtime.casgstatus (2 samples, 0.05%)</title><rect x="1174.4" y="309" width="0.6" height="15.0" fill="rgb(227,87,39)" rx="2" ry="2" />
+<text  x="1177.44" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.globrunqget (1 samples, 0.02%)</title><rect x="1182.4" y="277" width="0.2" height="15.0" fill="rgb(209,28,8)" rx="2" ry="2" />
+<text  x="1185.36" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.(*pageAlloc).scavenge (7 samples, 0.17%)</title><rect x="1138.8" y="309" width="2.0" height="15.0" fill="rgb(248,14,9)" rx="2" ry="2" />
+<text  x="1141.79" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc (1 samples, 0.02%)</title><rect x="977.3" y="245" width="0.2" height="15.0" fill="rgb(210,111,23)" rx="2" ry="2" />
+<text  x="980.25" y="255.5" ></text>
+</g>
+<g >
+<title>reflect.escapes (1 samples, 0.02%)</title><rect x="1108.5" y="277" width="0.3" height="15.0" fill="rgb(232,26,37)" rx="2" ry="2" />
+<text  x="1111.52" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.gcDrainN (1 samples, 0.02%)</title><rect x="1097.5" y="149" width="0.3" height="15.0" fill="rgb(251,106,8)" rx="2" ry="2" />
+<text  x="1100.49" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.reentersyscall (10 samples, 0.24%)</title><rect x="161.9" y="117" width="2.8" height="15.0" fill="rgb(245,100,54)" rx="2" ry="2" />
+<text  x="164.92" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierSI (1 samples, 0.02%)</title><rect x="920.4" y="245" width="0.3" height="15.0" fill="rgb(220,137,3)" rx="2" ry="2" />
+<text  x="923.39" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (7 samples, 0.17%)</title><rect x="145.5" y="261" width="2.0" height="15.0" fill="rgb(210,138,7)" rx="2" ry="2" />
+<text  x="148.51" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).uncacheSpan (1 samples, 0.02%)</title><rect x="1128.9" y="229" width="0.3" height="15.0" fill="rgb(221,167,29)" rx="2" ry="2" />
+<text  x="1131.89" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 0.02%)</title><rect x="1188.9" y="245" width="0.3" height="15.0" fill="rgb(238,7,5)" rx="2" ry="2" />
+<text  x="1191.87" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.gcStart (1 samples, 0.02%)</title><rect x="903.7" y="197" width="0.3" height="15.0" fill="rgb(220,214,44)" rx="2" ry="2" />
+<text  x="906.70" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.checkTimers (2 samples, 0.05%)</title><rect x="1181.8" y="277" width="0.6" height="15.0" fill="rgb(210,70,20)" rx="2" ry="2" />
+<text  x="1184.80" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.notetsleep_internal (1 samples, 0.02%)</title><rect x="1147.8" y="261" width="0.3" height="15.0" fill="rgb(217,139,47)" rx="2" ry="2" />
+<text  x="1150.85" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="150.9" y="197" width="0.3" height="15.0" fill="rgb(223,207,30)" rx="2" ry="2" />
+<text  x="153.89" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.exitsyscall (1 samples, 0.02%)</title><rect x="1135.7" y="293" width="0.3" height="15.0" fill="rgb(212,142,45)" rx="2" ry="2" />
+<text  x="1138.68" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (1 samples, 0.02%)</title><rect x="150.9" y="149" width="0.3" height="15.0" fill="rgb(224,217,53)" rx="2" ry="2" />
+<text  x="153.89" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.asyncPreempt (2 samples, 0.05%)</title><rect x="882.5" y="213" width="0.5" height="15.0" fill="rgb(230,183,32)" rx="2" ry="2" />
+<text  x="885.48" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 0.02%)</title><rect x="1147.8" y="229" width="0.3" height="15.0" fill="rgb(212,204,34)" rx="2" ry="2" />
+<text  x="1150.85" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (6 samples, 0.14%)</title><rect x="108.2" y="229" width="1.7" height="15.0" fill="rgb(243,50,21)" rx="2" ry="2" />
+<text  x="111.17" y="239.5" ></text>
+</g>
+<g >
+<title>sync.(*RWMutex).RUnlock (1 samples, 0.02%)</title><rect x="131.1" y="277" width="0.3" height="15.0" fill="rgb(223,51,33)" rx="2" ry="2" />
+<text  x="134.08" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (1 samples, 0.02%)</title><rect x="863.8" y="197" width="0.3" height="15.0" fill="rgb(243,26,9)" rx="2" ry="2" />
+<text  x="866.81" y="207.5" ></text>
+</g>
+<g >
+<title>reflect.Value.Interface (1 samples, 0.02%)</title><rect x="973.9" y="277" width="0.2" height="15.0" fill="rgb(223,91,22)" rx="2" ry="2" />
+<text  x="976.86" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (11 samples, 0.26%)</title><rect x="1041.5" y="213" width="3.1" height="15.0" fill="rgb(206,4,42)" rx="2" ry="2" />
+<text  x="1044.47" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (2 samples, 0.05%)</title><rect x="925.2" y="213" width="0.6" height="15.0" fill="rgb(246,185,30)" rx="2" ry="2" />
+<text  x="928.20" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.nanotime1 (2 samples, 0.05%)</title><rect x="1189.2" y="357" width="0.5" height="15.0" fill="rgb(222,166,39)" rx="2" ry="2" />
+<text  x="1192.15" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (2 samples, 0.05%)</title><rect x="1188.3" y="293" width="0.6" height="15.0" fill="rgb(226,166,41)" rx="2" ry="2" />
+<text  x="1191.30" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (8 samples, 0.19%)</title><rect x="1111.1" y="277" width="2.2" height="15.0" fill="rgb(245,17,39)" rx="2" ry="2" />
+<text  x="1114.07" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (5 samples, 0.12%)</title><rect x="866.9" y="229" width="1.4" height="15.0" fill="rgb(220,141,3)" rx="2" ry="2" />
+<text  x="869.92" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.pageIndexOf (1 samples, 0.02%)</title><rect x="1145.0" y="261" width="0.3" height="15.0" fill="rgb(254,212,16)" rx="2" ry="2" />
+<text  x="1148.02" y="271.5" ></text>
+</g>
+<g >
+<title>syscall.Syscall6 (8 samples, 0.19%)</title><rect x="1135.7" y="309" width="2.2" height="15.0" fill="rgb(245,209,27)" rx="2" ry="2" />
+<text  x="1138.68" y="319.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..LoadOk (14 samples, 0.34%)</title><rect x="127.4" y="293" width="4.0" height="15.0" fill="rgb(211,221,14)" rx="2" ry="2" />
+<text  x="130.41" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.duffzero (2 samples, 0.05%)</title><rect x="952.9" y="229" width="0.6" height="15.0" fill="rgb(211,169,24)" rx="2" ry="2" />
+<text  x="955.92" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.gcMarkTermination.func3 (1 samples, 0.02%)</title><rect x="1147.3" y="293" width="0.3" height="15.0" fill="rgb(236,223,46)" rx="2" ry="2" />
+<text  x="1150.28" y="303.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).pin (3 samples, 0.07%)</title><rect x="859.0" y="229" width="0.8" height="15.0" fill="rgb(254,91,15)" rx="2" ry="2" />
+<text  x="862.00" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc (1 samples, 0.02%)</title><rect x="1111.9" y="181" width="0.3" height="15.0" fill="rgb(235,144,7)" rx="2" ry="2" />
+<text  x="1114.92" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).grow (1 samples, 0.02%)</title><rect x="124.3" y="197" width="0.3" height="15.0" fill="rgb(248,164,5)" rx="2" ry="2" />
+<text  x="127.29" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*gcBits).bytep (1 samples, 0.02%)</title><rect x="1042.0" y="149" width="0.3" height="15.0" fill="rgb(226,192,48)" rx="2" ry="2" />
+<text  x="1045.04" y="159.5" ></text>
+</g>
+<g >
+<title>reflect.Value.Interface (5 samples, 0.12%)</title><rect x="920.7" y="261" width="1.4" height="15.0" fill="rgb(226,136,20)" rx="2" ry="2" />
+<text  x="923.67" y="271.5" ></text>
+</g>
+<g >
+<title>reflect.(*rtype).NumMethod (2 samples, 0.05%)</title><rect x="921.5" y="213" width="0.6" height="15.0" fill="rgb(228,93,16)" rx="2" ry="2" />
+<text  x="924.52" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.pageIndexOf (1 samples, 0.02%)</title><rect x="1074.0" y="181" width="0.3" height="15.0" fill="rgb(226,127,9)" rx="2" ry="2" />
+<text  x="1077.01" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.goready.func1 (2 samples, 0.05%)</title><rect x="1181.8" y="197" width="0.6" height="15.0" fill="rgb(217,60,39)" rx="2" ry="2" />
+<text  x="1184.80" y="207.5" ></text>
+</g>
+<g >
+<title>sync.(*Mutex).unlockSlow (1 samples, 0.02%)</title><rect x="859.6" y="181" width="0.2" height="15.0" fill="rgb(248,214,45)" rx="2" ry="2" />
+<text  x="862.57" y="191.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).pinSlow (2 samples, 0.05%)</title><rect x="859.3" y="213" width="0.5" height="15.0" fill="rgb(248,134,14)" rx="2" ry="2" />
+<text  x="862.28" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..LoadOk (18 samples, 0.43%)</title><rect x="988.3" y="277" width="5.1" height="15.0" fill="rgb(217,24,54)" rx="2" ry="2" />
+<text  x="991.29" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.ready (1 samples, 0.02%)</title><rect x="859.6" y="69" width="0.2" height="15.0" fill="rgb(207,199,33)" rx="2" ry="2" />
+<text  x="862.57" y="79.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="863.5" y="229" width="0.3" height="15.0" fill="rgb(224,110,32)" rx="2" ry="2" />
+<text  x="866.53" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (3 samples, 0.07%)</title><rect x="1099.8" y="229" width="0.8" height="15.0" fill="rgb(213,186,11)" rx="2" ry="2" />
+<text  x="1102.75" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="861.5" y="197" width="0.3" height="15.0" fill="rgb(245,227,3)" rx="2" ry="2" />
+<text  x="864.55" y="207.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgwriter.lRPCNoMuxWriter (2,432 samples, 58.31%)</title><rect x="153.7" y="245" width="688.0" height="15.0" fill="rgb(214,92,41)" rx="2" ry="2" />
+<text  x="156.72" y="255.5" >github.com/nyan233/littlerpc/pkg/common/msgwriter.lRPCNoMuxWriter</text>
+</g>
+<g >
+<title>runtime.(*mcentral).cacheSpan (1 samples, 0.02%)</title><rect x="1103.4" y="197" width="0.3" height="15.0" fill="rgb(209,57,35)" rx="2" ry="2" />
+<text  x="1106.43" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).uncacheSpan (2 samples, 0.05%)</title><rect x="867.5" y="197" width="0.6" height="15.0" fill="rgb(249,209,31)" rx="2" ry="2" />
+<text  x="870.49" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.mProf_Malloc (5 samples, 0.12%)</title><rect x="1074.3" y="165" width="1.4" height="15.0" fill="rgb(252,16,5)" rx="2" ry="2" />
+<text  x="1077.29" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.acquirem (1 samples, 0.02%)</title><rect x="1095.2" y="229" width="0.3" height="15.0" fill="rgb(226,58,7)" rx="2" ry="2" />
+<text  x="1098.23" y="239.5" ></text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (7 samples, 0.17%)</title><rect x="1136.0" y="293" width="1.9" height="15.0" fill="rgb(251,36,46)" rx="2" ry="2" />
+<text  x="1138.96" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (15 samples, 0.36%)</title><rect x="1095.5" y="229" width="4.3" height="15.0" fill="rgb(237,156,20)" rx="2" ry="2" />
+<text  x="1098.51" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/zbh255/bilog.(*TimeFactory).Start.func1 (3 samples, 0.07%)</title><rect x="1137.9" y="357" width="0.9" height="15.0" fill="rgb(221,135,44)" rx="2" ry="2" />
+<text  x="1140.95" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.preemptall (2 samples, 0.05%)</title><rect x="1148.1" y="277" width="0.6" height="15.0" fill="rgb(227,142,29)" rx="2" ry="2" />
+<text  x="1151.13" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.park_m (1 samples, 0.02%)</title><rect x="1188.9" y="341" width="0.3" height="15.0" fill="rgb(235,12,18)" rx="2" ry="2" />
+<text  x="1191.87" y="351.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*messageOpt).Check (447 samples, 10.72%)</title><rect x="986.9" y="293" width="126.4" height="15.0" fill="rgb(246,16,52)" rx="2" ry="2" />
+<text  x="989.87" y="303.5" >github.com/nyan..</text>
+</g>
+<g >
+<title>runtime.nilinterequal (1 samples, 0.02%)</title><rect x="130.0" y="261" width="0.2" height="15.0" fill="rgb(237,155,26)" rx="2" ry="2" />
+<text  x="132.95" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Reset (3 samples, 0.07%)</title><rect x="841.7" y="245" width="0.9" height="15.0" fill="rgb(208,42,34)" rx="2" ry="2" />
+<text  x="844.74" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (7 samples, 0.17%)</title><rect x="1147.6" y="325" width="1.9" height="15.0" fill="rgb(219,92,37)" rx="2" ry="2" />
+<text  x="1150.56" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (5 samples, 0.12%)</title><rect x="883.0" y="213" width="1.5" height="15.0" fill="rgb(239,13,11)" rx="2" ry="2" />
+<text  x="886.05" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Engine).initHandlers.func7 (2 samples, 0.05%)</title><rect x="838.9" y="197" width="0.6" height="15.0" fill="rgb(207,151,29)" rx="2" ry="2" />
+<text  x="841.91" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.heapBits.next (1 samples, 0.02%)</title><rect x="1097.5" y="133" width="0.3" height="15.0" fill="rgb(254,81,36)" rx="2" ry="2" />
+<text  x="1100.49" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.pageIndexOf (2 samples, 0.05%)</title><rect x="1061.8" y="181" width="0.6" height="15.0" fill="rgb(234,63,14)" rx="2" ry="2" />
+<text  x="1064.84" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.typehash (1 samples, 0.02%)</title><rect x="130.8" y="245" width="0.3" height="15.0" fill="rgb(227,136,5)" rx="2" ry="2" />
+<text  x="133.80" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (10 samples, 0.24%)</title><rect x="860.7" y="229" width="2.8" height="15.0" fill="rgb(205,165,26)" rx="2" ry="2" />
+<text  x="863.70" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (9 samples, 0.22%)</title><rect x="1130.0" y="261" width="2.6" height="15.0" fill="rgb(226,106,17)" rx="2" ry="2" />
+<text  x="1133.02" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (1 samples, 0.02%)</title><rect x="137.3" y="245" width="0.3" height="15.0" fill="rgb(241,20,23)" rx="2" ry="2" />
+<text  x="140.31" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1138.5" y="277" width="0.3" height="15.0" fill="rgb(221,73,45)" rx="2" ry="2" />
+<text  x="1141.51" y="287.5" ></text>
+</g>
+<g >
+<title>sync.(*RWMutex).RLock (2 samples, 0.05%)</title><rect x="1124.4" y="293" width="0.5" height="15.0" fill="rgb(229,203,5)" rx="2" ry="2" />
+<text  x="1127.37" y="303.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*messageOpt).RealPayload (28 samples, 0.67%)</title><rect x="1113.3" y="293" width="8.0" height="15.0" fill="rgb(244,89,22)" rx="2" ry="2" />
+<text  x="1116.33" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).grow (1 samples, 0.02%)</title><rect x="1103.4" y="181" width="0.3" height="15.0" fill="rgb(234,213,2)" rx="2" ry="2" />
+<text  x="1106.43" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.getMCache (1 samples, 0.02%)</title><rect x="868.3" y="229" width="0.3" height="15.0" fill="rgb(212,140,41)" rx="2" ry="2" />
+<text  x="871.34" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (13 samples, 0.31%)</title><rect x="1070.0" y="181" width="3.7" height="15.0" fill="rgb(243,48,34)" rx="2" ry="2" />
+<text  x="1073.05" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1133.1" y="213" width="0.3" height="15.0" fill="rgb(237,151,10)" rx="2" ry="2" />
+<text  x="1136.14" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.runqget (3 samples, 0.07%)</title><rect x="1184.9" y="277" width="0.9" height="15.0" fill="rgb(205,79,10)" rx="2" ry="2" />
+<text  x="1187.91" y="287.5" ></text>
+</g>
+<g >
+<title>reflect.(*funcType).out (1 samples, 0.02%)</title><rect x="946.4" y="245" width="0.3" height="15.0" fill="rgb(243,154,12)" rx="2" ry="2" />
+<text  x="949.42" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc.func1 (5 samples, 0.12%)</title><rect x="1070.3" y="85" width="1.4" height="15.0" fill="rgb(227,192,13)" rx="2" ry="2" />
+<text  x="1073.33" y="95.5" ></text>
+</g>
+<g >
+<title>runtime.nanotime (4 samples, 0.10%)</title><rect x="1175.0" y="309" width="1.1" height="15.0" fill="rgb(215,190,49)" rx="2" ry="2" />
+<text  x="1178.01" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.makeslice (1 samples, 0.02%)</title><rect x="859.3" y="197" width="0.3" height="15.0" fill="rgb(225,37,10)" rx="2" ry="2" />
+<text  x="862.28" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (2 samples, 0.05%)</title><rect x="137.0" y="261" width="0.6" height="15.0" fill="rgb(252,113,10)" rx="2" ry="2" />
+<text  x="140.02" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgparser.(*noMuxHandler).MessageLength (2 samples, 0.05%)</title><rect x="100.5" y="277" width="0.6" height="15.0" fill="rgb(224,141,8)" rx="2" ry="2" />
+<text  x="103.53" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="863.8" y="213" width="0.3" height="15.0" fill="rgb(235,8,46)" rx="2" ry="2" />
+<text  x="866.81" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.gcDrainN (1 samples, 0.02%)</title><rect x="903.4" y="133" width="0.3" height="15.0" fill="rgb(219,97,10)" rx="2" ry="2" />
+<text  x="906.42" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.releasem (2 samples, 0.05%)</title><rect x="911.1" y="213" width="0.5" height="15.0" fill="rgb(206,184,39)" rx="2" ry="2" />
+<text  x="914.05" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc (1 samples, 0.02%)</title><rect x="1097.5" y="213" width="0.3" height="15.0" fill="rgb(213,72,42)" rx="2" ry="2" />
+<text  x="1100.49" y="223.5" ></text>
+</g>
+<g >
+<title>reflect.(*rtype).Kind (5 samples, 0.12%)</title><rect x="948.4" y="245" width="1.4" height="15.0" fill="rgb(242,165,26)" rx="2" ry="2" />
+<text  x="951.40" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (4 samples, 0.10%)</title><rect x="1102.6" y="229" width="1.1" height="15.0" fill="rgb(213,156,13)" rx="2" ry="2" />
+<text  x="1105.58" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).cacheSpan (1 samples, 0.02%)</title><rect x="1096.4" y="181" width="0.2" height="15.0" fill="rgb(246,149,27)" rx="2" ry="2" />
+<text  x="1099.36" y="191.5" ></text>
+</g>
+<g >
+<title>strconv.FormatInt (21 samples, 0.50%)</title><rect x="979.0" y="261" width="5.9" height="15.0" fill="rgb(223,90,16)" rx="2" ry="2" />
+<text  x="981.95" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.memequal (1 samples, 0.02%)</title><rect x="990.6" y="181" width="0.2" height="15.0" fill="rgb(251,27,52)" rx="2" ry="2" />
+<text  x="993.55" y="191.5" ></text>
+</g>
+<g >
+<title>reflect.unsafe_New (9 samples, 0.22%)</title><rect x="961.1" y="245" width="2.6" height="15.0" fill="rgb(235,105,17)" rx="2" ry="2" />
+<text  x="964.13" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Conn).readTCP (1 samples, 0.02%)</title><rect x="17.6" y="293" width="0.3" height="15.0" fill="rgb(208,38,43)" rx="2" ry="2" />
+<text  x="20.64" y="303.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).Put (2 samples, 0.05%)</title><rect x="859.8" y="245" width="0.6" height="15.0" fill="rgb(211,133,1)" rx="2" ry="2" />
+<text  x="862.85" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.typehash (8 samples, 0.19%)</title><rect x="990.8" y="213" width="2.3" height="15.0" fill="rgb(251,50,37)" rx="2" ry="2" />
+<text  x="993.83" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.newAllocBits (1 samples, 0.02%)</title><rect x="1071.5" y="53" width="0.2" height="15.0" fill="rgb(240,6,0)" rx="2" ry="2" />
+<text  x="1074.46" y="63.5" ></text>
+</g>
+<g >
+<title>runtime.gentraceback (5 samples, 0.12%)</title><rect x="1074.3" y="101" width="1.4" height="15.0" fill="rgb(233,198,31)" rx="2" ry="2" />
+<text  x="1077.29" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (2 samples, 0.05%)</title><rect x="117.5" y="245" width="0.6" height="15.0" fill="rgb(244,123,36)" rx="2" ry="2" />
+<text  x="120.50" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="863.8" y="245" width="0.3" height="15.0" fill="rgb(248,27,38)" rx="2" ry="2" />
+<text  x="866.81" y="255.5" ></text>
+</g>
+<g >
+<title>syscall.read (231 samples, 5.54%)</title><rect x="17.9" y="277" width="65.4" height="15.0" fill="rgb(226,30,0)" rx="2" ry="2" />
+<text  x="20.92" y="287.5" >syscall..</text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="857.9" y="213" width="0.3" height="15.0" fill="rgb(217,101,19)" rx="2" ry="2" />
+<text  x="860.87" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.futex (2 samples, 0.05%)</title><rect x="1188.3" y="277" width="0.6" height="15.0" fill="rgb(241,17,53)" rx="2" ry="2" />
+<text  x="1191.30" y="287.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*Server).onMessage (3,660 samples, 87.75%)</title><rect x="89.5" y="309" width="1035.4" height="15.0" fill="rgb(254,216,9)" rx="2" ry="2" />
+<text  x="92.50" y="319.5" >github.com/nyan233/littlerpc/server.(*Server).onMessage</text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Len (2 samples, 0.05%)</title><rect x="855.6" y="213" width="0.6" height="15.0" fill="rgb(212,179,47)" rx="2" ry="2" />
+<text  x="858.61" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.asyncPreempt (1 samples, 0.02%)</title><rect x="1101.5" y="261" width="0.2" height="15.0" fill="rgb(240,120,36)" rx="2" ry="2" />
+<text  x="1104.45" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Reset (14 samples, 0.34%)</title><rect x="133.1" y="277" width="3.9" height="15.0" fill="rgb(227,194,46)" rx="2" ry="2" />
+<text  x="136.06" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.goschedImpl (43 samples, 1.03%)</title><rect x="1174.4" y="325" width="12.2" height="15.0" fill="rgb(239,83,47)" rx="2" ry="2" />
+<text  x="1177.44" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).allocSpan (1 samples, 0.02%)</title><rect x="867.2" y="117" width="0.3" height="15.0" fill="rgb(246,20,34)" rx="2" ry="2" />
+<text  x="870.20" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.nilinterhash (1 samples, 0.02%)</title><rect x="958.0" y="197" width="0.3" height="15.0" fill="rgb(226,126,53)" rx="2" ry="2" />
+<text  x="961.02" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (2 samples, 0.05%)</title><rect x="1111.6" y="245" width="0.6" height="15.0" fill="rgb(210,214,7)" rx="2" ry="2" />
+<text  x="1114.64" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.goready.func1 (1 samples, 0.02%)</title><rect x="859.6" y="85" width="0.2" height="15.0" fill="rgb(253,136,40)" rx="2" ry="2" />
+<text  x="862.57" y="95.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).Put (2 samples, 0.05%)</title><rect x="986.3" y="277" width="0.6" height="15.0" fill="rgb(226,10,54)" rx="2" ry="2" />
+<text  x="989.31" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (2 samples, 0.05%)</title><rect x="965.4" y="181" width="0.5" height="15.0" fill="rgb(222,76,28)" rx="2" ry="2" />
+<text  x="968.37" y="191.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgparser.(*LMessageParser).ResetScan (1 samples, 0.02%)</title><rect x="126.8" y="293" width="0.3" height="15.0" fill="rgb(212,109,43)" rx="2" ry="2" />
+<text  x="129.84" y="303.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).Get (6 samples, 0.14%)</title><rect x="858.2" y="245" width="1.6" height="15.0" fill="rgb(239,143,39)" rx="2" ry="2" />
+<text  x="861.15" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.bulkBarrierPreWrite (4 samples, 0.10%)</title><rect x="924.6" y="245" width="1.2" height="15.0" fill="rgb(223,221,30)" rx="2" ry="2" />
+<text  x="927.63" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.spanOf (1 samples, 0.02%)</title><rect x="849.4" y="133" width="0.3" height="15.0" fill="rgb(246,150,29)" rx="2" ry="2" />
+<text  x="852.38" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.makeslice (47 samples, 1.13%)</title><rect x="898.3" y="229" width="13.3" height="15.0" fill="rgb(219,193,8)" rx="2" ry="2" />
+<text  x="901.32" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*spanSet).push (1 samples, 0.02%)</title><rect x="977.0" y="197" width="0.3" height="15.0" fill="rgb(223,76,6)" rx="2" ry="2" />
+<text  x="979.97" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (1 samples, 0.02%)</title><rect x="150.9" y="181" width="0.3" height="15.0" fill="rgb(217,143,18)" rx="2" ry="2" />
+<text  x="153.89" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.getitab (3 samples, 0.07%)</title><rect x="974.1" y="261" width="0.9" height="15.0" fill="rgb(229,200,41)" rx="2" ry="2" />
+<text  x="977.14" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Conn).Write (2,419 samples, 58.00%)</title><rect x="155.1" y="213" width="684.4" height="15.0" fill="rgb(243,34,23)" rx="2" ry="2" />
+<text  x="158.13" y="223.5" >github.com/lesismal/nbio.(*Conn).Write</text>
+</g>
+<g >
+<title>runtime/internal/atomic.(*UnsafePointer).StoreNoWB (1 samples, 0.02%)</title><rect x="1137.9" y="245" width="0.3" height="15.0" fill="rgb(252,160,18)" rx="2" ry="2" />
+<text  x="1140.95" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (14 samples, 0.34%)</title><rect x="1101.7" y="261" width="4.0" height="15.0" fill="rgb(238,212,27)" rx="2" ry="2" />
+<text  x="1104.73" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc1 (1 samples, 0.02%)</title><rect x="903.4" y="149" width="0.3" height="15.0" fill="rgb(213,104,11)" rx="2" ry="2" />
+<text  x="906.42" y="159.5" ></text>
+</g>
+<g >
+<title>syscall.Write (2,402 samples, 57.59%)</title><rect x="159.4" y="181" width="679.5" height="15.0" fill="rgb(249,59,6)" rx="2" ry="2" />
+<text  x="162.37" y="191.5" >syscall.Write</text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="113.3" y="261" width="0.2" height="15.0" fill="rgb(254,224,46)" rx="2" ry="2" />
+<text  x="116.26" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.nilinterequal (6 samples, 0.14%)</title><rect x="989.1" y="229" width="1.7" height="15.0" fill="rgb(230,139,21)" rx="2" ry="2" />
+<text  x="992.14" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Conn).write (2,404 samples, 57.64%)</title><rect x="158.8" y="197" width="680.1" height="15.0" fill="rgb(237,171,37)" rx="2" ry="2" />
+<text  x="161.81" y="207.5" >github.com/lesismal/nbio.(*Conn).write</text>
+</g>
+<g >
+<title>runtime.heapBitsForAddr (2 samples, 0.05%)</title><rect x="1129.5" y="261" width="0.5" height="15.0" fill="rgb(251,169,12)" rx="2" ry="2" />
+<text  x="1132.46" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.exitsyscall (4 samples, 0.10%)</title><rect x="19.1" y="245" width="1.1" height="15.0" fill="rgb(224,176,14)" rx="2" ry="2" />
+<text  x="22.05" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*poller).readWriteLoop (3,978 samples, 95.37%)</title><rect x="12.5" y="341" width="1125.4" height="15.0" fill="rgb(247,190,43)" rx="2" ry="2" />
+<text  x="15.55" y="351.5" >github.com/lesismal/nbio.(*poller).readWriteLoop</text>
+</g>
+<g >
+<title>runtime.(*gcControllerState).findRunnableGCWorker (2 samples, 0.05%)</title><rect x="1181.2" y="277" width="0.6" height="15.0" fill="rgb(226,205,38)" rx="2" ry="2" />
+<text  x="1184.23" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.(*timeHistogram).record (2 samples, 0.05%)</title><rect x="1177.0" y="277" width="0.6" height="15.0" fill="rgb(252,196,18)" rx="2" ry="2" />
+<text  x="1179.99" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.reentersyscall (2 samples, 0.05%)</title><rect x="18.5" y="229" width="0.6" height="15.0" fill="rgb(224,32,14)" rx="2" ry="2" />
+<text  x="21.49" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.gcDrainN (1 samples, 0.02%)</title><rect x="124.6" y="181" width="0.3" height="15.0" fill="rgb(226,57,29)" rx="2" ry="2" />
+<text  x="127.58" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (1 samples, 0.02%)</title><rect x="849.7" y="213" width="0.2" height="15.0" fill="rgb(218,147,37)" rx="2" ry="2" />
+<text  x="852.66" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (17 samples, 0.41%)</title><rect x="967.4" y="229" width="4.8" height="15.0" fill="rgb(245,122,3)" rx="2" ry="2" />
+<text  x="970.35" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.exitsyscallfast (2 samples, 0.05%)</title><rect x="19.6" y="229" width="0.6" height="15.0" fill="rgb(235,197,44)" rx="2" ry="2" />
+<text  x="22.62" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.callers (1 samples, 0.02%)</title><rect x="1133.1" y="229" width="0.3" height="15.0" fill="rgb(251,73,27)" rx="2" ry="2" />
+<text  x="1136.14" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.getMCache (1 samples, 0.02%)</title><rect x="1050.2" y="197" width="0.3" height="15.0" fill="rgb(230,72,11)" rx="2" ry="2" />
+<text  x="1053.24" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc (1 samples, 0.02%)</title><rect x="124.6" y="245" width="0.3" height="15.0" fill="rgb(236,49,7)" rx="2" ry="2" />
+<text  x="127.58" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (2 samples, 0.05%)</title><rect x="1181.8" y="117" width="0.6" height="15.0" fill="rgb(220,95,36)" rx="2" ry="2" />
+<text  x="1184.80" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.(*gcControllerState).update (1 samples, 0.02%)</title><rect x="866.9" y="197" width="0.3" height="15.0" fill="rgb(218,186,40)" rx="2" ry="2" />
+<text  x="869.92" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.markBits.isMarked (1 samples, 0.02%)</title><rect x="1042.3" y="149" width="0.3" height="15.0" fill="rgb(248,228,43)" rx="2" ry="2" />
+<text  x="1045.32" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (2 samples, 0.05%)</title><rect x="965.4" y="213" width="0.5" height="15.0" fill="rgb(242,152,5)" rx="2" ry="2" />
+<text  x="968.37" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (5 samples, 0.12%)</title><rect x="982.6" y="213" width="1.4" height="15.0" fill="rgb(252,105,32)" rx="2" ry="2" />
+<text  x="985.63" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*pluginManager).OnMessage (11 samples, 0.26%)</title><rect x="1115.6" y="277" width="3.1" height="15.0" fill="rgb(232,124,42)" rx="2" ry="2" />
+<text  x="1118.60" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.lock2 (1 samples, 0.02%)</title><rect x="1140.8" y="325" width="0.3" height="15.0" fill="rgb(244,198,3)" rx="2" ry="2" />
+<text  x="1143.77" y="335.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/internal/reflect.ToTypePtr (3 samples, 0.07%)</title><rect x="996.2" y="245" width="0.9" height="15.0" fill="rgb(251,92,35)" rx="2" ry="2" />
+<text  x="999.21" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*itabTableType).find (7 samples, 0.17%)</title><rect x="1084.8" y="197" width="1.9" height="15.0" fill="rgb(237,28,42)" rx="2" ry="2" />
+<text  x="1087.76" y="207.5" ></text>
+</g>
+<g >
+<title>reflect.TypeOf (1 samples, 0.02%)</title><rect x="1086.7" y="245" width="0.3" height="15.0" fill="rgb(251,12,41)" rx="2" ry="2" />
+<text  x="1089.74" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*consistentHeapStats).acquire (1 samples, 0.02%)</title><rect x="1061.0" y="149" width="0.3" height="15.0" fill="rgb(254,93,23)" rx="2" ry="2" />
+<text  x="1063.99" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.gcmarknewobject (1 samples, 0.02%)</title><rect x="115.5" y="245" width="0.3" height="15.0" fill="rgb(248,35,22)" rx="2" ry="2" />
+<text  x="118.52" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.markBits.isMarked (1 samples, 0.02%)</title><rect x="1146.4" y="325" width="0.3" height="15.0" fill="rgb(251,122,4)" rx="2" ry="2" />
+<text  x="1149.43" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.(*gcBitsArena).tryAlloc (1 samples, 0.02%)</title><rect x="1144.2" y="309" width="0.3" height="15.0" fill="rgb(232,153,19)" rx="2" ry="2" />
+<text  x="1147.17" y="319.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).SetInstanceName (1 samples, 0.02%)</title><rect x="101.7" y="261" width="0.2" height="15.0" fill="rgb(225,171,38)" rx="2" ry="2" />
+<text  x="104.66" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.gcMarkTermination (1 samples, 0.02%)</title><rect x="1147.3" y="325" width="0.3" height="15.0" fill="rgb(210,199,10)" rx="2" ry="2" />
+<text  x="1150.28" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).uncacheSpan (1 samples, 0.02%)</title><rect x="111.3" y="181" width="0.3" height="15.0" fill="rgb(226,149,43)" rx="2" ry="2" />
+<text  x="114.28" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (1 samples, 0.02%)</title><rect x="111.8" y="229" width="0.3" height="15.0" fill="rgb(219,49,40)" rx="2" ry="2" />
+<text  x="114.85" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.entersyscall (11 samples, 0.26%)</title><rect x="161.6" y="133" width="3.1" height="15.0" fill="rgb(242,84,44)" rx="2" ry="2" />
+<text  x="164.64" y="143.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common.(*SharedPool).TakeMessagePool (3 samples, 0.07%)</title><rect x="90.9" y="293" width="0.9" height="15.0" fill="rgb(253,29,16)" rx="2" ry="2" />
+<text  x="93.91" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1129.2" y="245" width="0.3" height="15.0" fill="rgb(228,65,50)" rx="2" ry="2" />
+<text  x="1132.18" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc (1 samples, 0.02%)</title><rect x="1103.4" y="165" width="0.3" height="15.0" fill="rgb(236,197,3)" rx="2" ry="2" />
+<text  x="1106.43" y="175.5" ></text>
+</g>
+<g >
+<title>github.com/zbh255/bilog.fastConvertAllToSlice (2 samples, 0.05%)</title><rect x="1137.9" y="325" width="0.6" height="15.0" fill="rgb(211,156,52)" rx="2" ry="2" />
+<text  x="1140.95" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (3 samples, 0.07%)</title><rect x="861.8" y="213" width="0.9" height="15.0" fill="rgb(252,74,15)" rx="2" ry="2" />
+<text  x="864.83" y="223.5" ></text>
+</g>
+<g >
+<title>reflect.intFromReg (4 samples, 0.10%)</title><rect x="959.1" y="245" width="1.2" height="15.0" fill="rgb(238,43,24)" rx="2" ry="2" />
+<text  x="962.15" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (3 samples, 0.07%)</title><rect x="110.7" y="229" width="0.9" height="15.0" fill="rgb(221,141,29)" rx="2" ry="2" />
+<text  x="113.71" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.unlock2 (3 samples, 0.07%)</title><rect x="1148.7" y="277" width="0.8" height="15.0" fill="rgb(249,36,0)" rx="2" ry="2" />
+<text  x="1151.70" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc (1 samples, 0.02%)</title><rect x="1073.7" y="181" width="0.3" height="15.0" fill="rgb(210,87,8)" rx="2" ry="2" />
+<text  x="1076.73" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.tgkill (2 samples, 0.05%)</title><rect x="1148.1" y="229" width="0.6" height="15.0" fill="rgb(239,183,43)" rx="2" ry="2" />
+<text  x="1151.13" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1147.3" y="309" width="0.3" height="15.0" fill="rgb(205,229,11)" rx="2" ry="2" />
+<text  x="1150.28" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.gcDrainN (1 samples, 0.02%)</title><rect x="1138.5" y="229" width="0.3" height="15.0" fill="rgb(241,126,47)" rx="2" ry="2" />
+<text  x="1141.51" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.notewakeup (1 samples, 0.02%)</title><rect x="1188.9" y="261" width="0.3" height="15.0" fill="rgb(248,204,19)" rx="2" ry="2" />
+<text  x="1191.87" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (7 samples, 0.17%)</title><rect x="1080.2" y="197" width="2.0" height="15.0" fill="rgb(247,156,52)" rx="2" ry="2" />
+<text  x="1083.23" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="863.5" y="261" width="0.3" height="15.0" fill="rgb(227,11,12)" rx="2" ry="2" />
+<text  x="866.53" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.gcBgMarkWorker.func2 (84 samples, 2.01%)</title><rect x="1149.5" y="325" width="23.8" height="15.0" fill="rgb(248,28,35)" rx="2" ry="2" />
+<text  x="1152.54" y="335.5" >r..</text>
+</g>
+<g >
+<title>encoding/binary.bigEndian.PutUint32 (1 samples, 0.02%)</title><rect x="153.4" y="245" width="0.3" height="15.0" fill="rgb(236,33,44)" rx="2" ry="2" />
+<text  x="156.43" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.casgstatus (1 samples, 0.02%)</title><rect x="97.7" y="181" width="0.3" height="15.0" fill="rgb(222,12,6)" rx="2" ry="2" />
+<text  x="100.70" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (36 samples, 0.86%)</title><rect x="898.9" y="213" width="10.2" height="15.0" fill="rgb(246,53,4)" rx="2" ry="2" />
+<text  x="901.89" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (2 samples, 0.05%)</title><rect x="1128.6" y="261" width="0.6" height="15.0" fill="rgb(232,24,40)" rx="2" ry="2" />
+<text  x="1131.61" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.spanOf (1 samples, 0.02%)</title><rect x="1123.2" y="181" width="0.3" height="15.0" fill="rgb(226,138,27)" rx="2" ry="2" />
+<text  x="1126.23" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (15 samples, 0.36%)</title><rect x="904.0" y="197" width="4.2" height="15.0" fill="rgb(224,219,0)" rx="2" ry="2" />
+<text  x="906.98" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.pcdatavalue (1 samples, 0.02%)</title><rect x="908.8" y="101" width="0.3" height="15.0" fill="rgb(231,222,40)" rx="2" ry="2" />
+<text  x="911.79" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.asyncPreempt (1 samples, 0.02%)</title><rect x="922.9" y="261" width="0.3" height="15.0" fill="rgb(251,206,33)" rx="2" ry="2" />
+<text  x="925.94" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="859.6" y="101" width="0.2" height="15.0" fill="rgb(210,92,27)" rx="2" ry="2" />
+<text  x="862.57" y="111.5" ></text>
+</g>
+<g >
+<title>github.com/rpcxio/rpcx-benchmark/proto.(*BenchmarkMessage).Reset (9 samples, 0.22%)</title><rect x="923.2" y="277" width="2.6" height="15.0" fill="rgb(217,26,30)" rx="2" ry="2" />
+<text  x="926.22" y="287.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Take (2 samples, 0.05%)</title><rect x="1088.2" y="261" width="0.5" height="15.0" fill="rgb(216,48,23)" rx="2" ry="2" />
+<text  x="1091.15" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.goschedImpl (1 samples, 0.02%)</title><rect x="97.7" y="229" width="0.3" height="15.0" fill="rgb(234,222,21)" rx="2" ry="2" />
+<text  x="100.70" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*spanSet).pop (2 samples, 0.05%)</title><rect x="1142.2" y="309" width="0.6" height="15.0" fill="rgb(237,179,32)" rx="2" ry="2" />
+<text  x="1145.19" y="319.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).pin (4 samples, 0.10%)</title><rect x="149.8" y="245" width="1.1" height="15.0" fill="rgb(227,127,38)" rx="2" ry="2" />
+<text  x="152.76" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="1123.2" y="261" width="0.3" height="15.0" fill="rgb(215,100,18)" rx="2" ry="2" />
+<text  x="1126.23" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.spanOf (1 samples, 0.02%)</title><rect x="1173.0" y="277" width="0.3" height="15.0" fill="rgb(253,56,20)" rx="2" ry="2" />
+<text  x="1176.03" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc.func1 (1 samples, 0.02%)</title><rect x="977.3" y="213" width="0.2" height="15.0" fill="rgb(237,57,5)" rx="2" ry="2" />
+<text  x="980.25" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (11 samples, 0.26%)</title><rect x="860.4" y="245" width="3.1" height="15.0" fill="rgb(231,42,35)" rx="2" ry="2" />
+<text  x="863.41" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 0.02%)</title><rect x="859.3" y="181" width="0.3" height="15.0" fill="rgb(211,169,10)" rx="2" ry="2" />
+<text  x="862.28" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.lockWithRank (1 samples, 0.02%)</title><rect x="1186.6" y="325" width="0.3" height="15.0" fill="rgb(245,17,13)" rx="2" ry="2" />
+<text  x="1189.61" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.futex (1 samples, 0.02%)</title><rect x="1147.6" y="213" width="0.2" height="15.0" fill="rgb(244,27,15)" rx="2" ry="2" />
+<text  x="1150.56" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (2 samples, 0.05%)</title><rect x="978.1" y="245" width="0.6" height="15.0" fill="rgb(213,54,28)" rx="2" ry="2" />
+<text  x="981.10" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.scanobject (1 samples, 0.02%)</title><rect x="1073.7" y="101" width="0.3" height="15.0" fill="rgb(231,217,4)" rx="2" ry="2" />
+<text  x="1076.73" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (1 samples, 0.02%)</title><rect x="1118.7" y="213" width="0.3" height="15.0" fill="rgb(211,143,18)" rx="2" ry="2" />
+<text  x="1121.71" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).uncacheSpan (1 samples, 0.02%)</title><rect x="1096.6" y="181" width="0.3" height="15.0" fill="rgb(210,26,46)" rx="2" ry="2" />
+<text  x="1099.64" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.(*itabTableType).find (2 samples, 0.05%)</title><rect x="974.4" y="245" width="0.6" height="15.0" fill="rgb(212,167,10)" rx="2" ry="2" />
+<text  x="977.43" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.divRoundUp (1 samples, 0.02%)</title><rect x="121.5" y="261" width="0.2" height="15.0" fill="rgb(218,154,0)" rx="2" ry="2" />
+<text  x="124.46" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (1 samples, 0.02%)</title><rect x="1138.5" y="325" width="0.3" height="15.0" fill="rgb(215,24,38)" rx="2" ry="2" />
+<text  x="1141.51" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).allocSpan (1 samples, 0.02%)</title><rect x="1111.9" y="133" width="0.3" height="15.0" fill="rgb(245,131,14)" rx="2" ry="2" />
+<text  x="1114.92" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.schedule (1 samples, 0.02%)</title><rect x="97.7" y="213" width="0.3" height="15.0" fill="rgb(214,39,48)" rx="2" ry="2" />
+<text  x="100.70" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/rpcxio/rpcx-benchmark/littlerpc/codec.ProtoBufCodec.Unmarshal (317 samples, 7.60%)</title><rect x="997.1" y="245" width="89.6" height="15.0" fill="rgb(211,77,24)" rx="2" ry="2" />
+<text  x="1000.06" y="255.5" >github.com..</text>
+</g>
+<g >
+<title>runtime.lock2 (1 samples, 0.02%)</title><rect x="1145.6" y="293" width="0.3" height="15.0" fill="rgb(225,137,33)" rx="2" ry="2" />
+<text  x="1148.58" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.gcBgMarkWorker (92 samples, 2.21%)</title><rect x="1147.3" y="357" width="26.0" height="15.0" fill="rgb(227,129,43)" rx="2" ry="2" />
+<text  x="1150.28" y="367.5" >r..</text>
+</g>
+<g >
+<title>runtime.callers (3 samples, 0.07%)</title><rect x="908.2" y="165" width="0.9" height="15.0" fill="rgb(213,99,43)" rx="2" ry="2" />
+<text  x="911.23" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 0.02%)</title><rect x="1137.9" y="293" width="0.3" height="15.0" fill="rgb(236,227,14)" rx="2" ry="2" />
+<text  x="1140.95" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.(*fixalloc).alloc (1 samples, 0.02%)</title><rect x="1111.9" y="101" width="0.3" height="15.0" fill="rgb(232,14,22)" rx="2" ry="2" />
+<text  x="1114.92" y="111.5" ></text>
+</g>
+<g >
+<title>sync.(*Mutex).Unlock (2 samples, 0.05%)</title><rect x="839.5" y="213" width="0.5" height="15.0" fill="rgb(226,31,31)" rx="2" ry="2" />
+<text  x="842.48" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.mapaccess2 (12 samples, 0.29%)</title><rect x="127.7" y="277" width="3.4" height="15.0" fill="rgb(245,192,27)" rx="2" ry="2" />
+<text  x="130.69" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).uncacheSpan (1 samples, 0.02%)</title><rect x="1061.3" y="149" width="0.3" height="15.0" fill="rgb(250,97,22)" rx="2" ry="2" />
+<text  x="1064.28" y="159.5" ></text>
+</g>
+<g >
+<title>sync/atomic.(*Value).Load (2 samples, 0.05%)</title><rect x="958.6" y="229" width="0.5" height="15.0" fill="rgb(239,118,3)" rx="2" ry="2" />
+<text  x="961.58" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).allocMSpanLocked (1 samples, 0.02%)</title><rect x="1111.9" y="117" width="0.3" height="15.0" fill="rgb(243,32,10)" rx="2" ry="2" />
+<text  x="1114.92" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.profilealloc (3 samples, 0.07%)</title><rect x="908.2" y="197" width="0.9" height="15.0" fill="rgb(240,144,39)" rx="2" ry="2" />
+<text  x="911.23" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.duffcopy (2 samples, 0.05%)</title><rect x="963.7" y="245" width="0.5" height="15.0" fill="rgb(213,225,21)" rx="2" ry="2" />
+<text  x="966.68" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierDX (1 samples, 0.02%)</title><rect x="857.9" y="229" width="0.3" height="15.0" fill="rgb(249,161,49)" rx="2" ry="2" />
+<text  x="860.87" y="239.5" ></text>
+</g>
+<g >
+<title>internal/abi.(*RegArgs).IntRegArgAddr (1 samples, 0.02%)</title><rect x="943.6" y="245" width="0.3" height="15.0" fill="rgb(217,109,54)" rx="2" ry="2" />
+<text  x="946.59" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (69 samples, 1.65%)</title><rect x="1044.6" y="213" width="19.5" height="15.0" fill="rgb(223,214,0)" rx="2" ry="2" />
+<text  x="1047.59" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.acquirem (2 samples, 0.05%)</title><rect x="1066.4" y="197" width="0.5" height="15.0" fill="rgb(219,32,1)" rx="2" ry="2" />
+<text  x="1069.37" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.acquirem (1 samples, 0.02%)</title><rect x="982.1" y="213" width="0.2" height="15.0" fill="rgb(244,216,26)" rx="2" ry="2" />
+<text  x="985.06" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).nextFreeIndex (1 samples, 0.02%)</title><rect x="1096.9" y="197" width="0.3" height="15.0" fill="rgb(218,146,50)" rx="2" ry="2" />
+<text  x="1099.92" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.heapBits.initSpan (1 samples, 0.02%)</title><rect x="1071.7" y="117" width="0.3" height="15.0" fill="rgb(205,157,33)" rx="2" ry="2" />
+<text  x="1074.75" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.gcStart.func2 (1 samples, 0.02%)</title><rect x="903.7" y="165" width="0.3" height="15.0" fill="rgb(236,27,15)" rx="2" ry="2" />
+<text  x="906.70" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (1 samples, 0.02%)</title><rect x="1123.2" y="245" width="0.3" height="15.0" fill="rgb(249,11,37)" rx="2" ry="2" />
+<text  x="1126.23" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgparser.(*LMessageParser).FreeMessage (13 samples, 0.31%)</title><rect x="85.3" y="309" width="3.6" height="15.0" fill="rgb(226,25,25)" rx="2" ry="2" />
+<text  x="88.25" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.(*mspan).refillAllocCache (2 samples, 0.05%)</title><rect x="1072.0" y="133" width="0.6" height="15.0" fill="rgb(219,38,48)" rx="2" ry="2" />
+<text  x="1075.03" y="143.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*Server).setErrResult (19 samples, 0.46%)</title><rect x="916.7" y="277" width="5.4" height="15.0" fill="rgb(238,144,4)" rx="2" ry="2" />
+<text  x="919.71" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (2 samples, 0.05%)</title><rect x="849.1" y="149" width="0.6" height="15.0" fill="rgb(241,105,6)" rx="2" ry="2" />
+<text  x="852.10" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.(*spanSet).push (2 samples, 0.05%)</title><rect x="867.5" y="181" width="0.6" height="15.0" fill="rgb(227,77,16)" rx="2" ry="2" />
+<text  x="870.49" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush1 (1 samples, 0.02%)</title><rect x="1123.2" y="197" width="0.3" height="15.0" fill="rgb(246,100,43)" rx="2" ry="2" />
+<text  x="1126.23" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).allocSpan (6 samples, 0.14%)</title><rect x="901.2" y="85" width="1.7" height="15.0" fill="rgb(237,43,12)" rx="2" ry="2" />
+<text  x="904.15" y="95.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (1 samples, 0.02%)</title><rect x="977.0" y="245" width="0.3" height="15.0" fill="rgb(224,130,12)" rx="2" ry="2" />
+<text  x="979.97" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.releasem (1 samples, 0.02%)</title><rect x="984.6" y="213" width="0.3" height="15.0" fill="rgb(221,84,33)" rx="2" ry="2" />
+<text  x="987.61" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.ready (2 samples, 0.05%)</title><rect x="1181.8" y="181" width="0.6" height="15.0" fill="rgb(234,117,14)" rx="2" ry="2" />
+<text  x="1184.80" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.exitsyscall (23 samples, 0.55%)</title><rect x="164.7" y="133" width="6.6" height="15.0" fill="rgb(216,48,12)" rx="2" ry="2" />
+<text  x="167.75" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1118.7" y="229" width="0.3" height="15.0" fill="rgb(236,123,19)" rx="2" ry="2" />
+<text  x="1121.71" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.slicebytetostring (7 samples, 0.17%)</title><rect x="110.1" y="245" width="2.0" height="15.0" fill="rgb(250,114,24)" rx="2" ry="2" />
+<text  x="113.15" y="255.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).getSlow (3 samples, 0.07%)</title><rect x="99.1" y="245" width="0.9" height="15.0" fill="rgb(210,184,9)" rx="2" ry="2" />
+<text  x="102.12" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc.func1 (1 samples, 0.02%)</title><rect x="1138.5" y="261" width="0.3" height="15.0" fill="rgb(207,13,44)" rx="2" ry="2" />
+<text  x="1141.51" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.unlock2 (7 samples, 0.17%)</title><rect x="1186.9" y="309" width="2.0" height="15.0" fill="rgb(251,37,17)" rx="2" ry="2" />
+<text  x="1189.89" y="319.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (2,355 samples, 56.46%)</title><rect x="172.7" y="117" width="666.2" height="15.0" fill="rgb(211,193,33)" rx="2" ry="2" />
+<text  x="175.67" y="127.5" >runtime/internal/syscall.Syscall6</text>
+</g>
+<g >
+<title>runtime.add (1 samples, 0.02%)</title><rect x="127.4" y="277" width="0.3" height="15.0" fill="rgb(254,109,37)" rx="2" ry="2" />
+<text  x="130.41" y="287.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgparser.GetMessageHandler (1 samples, 0.02%)</title><rect x="127.1" y="293" width="0.3" height="15.0" fill="rgb(217,173,6)" rx="2" ry="2" />
+<text  x="130.12" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.casgstatus (4 samples, 0.10%)</title><rect x="163.6" y="101" width="1.1" height="15.0" fill="rgb(209,49,49)" rx="2" ry="2" />
+<text  x="166.62" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.(*spanSet).push (1 samples, 0.02%)</title><rect x="1072.6" y="133" width="0.3" height="15.0" fill="rgb(222,63,48)" rx="2" ry="2" />
+<text  x="1075.59" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.startTheWorldWithSema (1 samples, 0.02%)</title><rect x="903.7" y="149" width="0.3" height="15.0" fill="rgb(251,182,25)" rx="2" ry="2" />
+<text  x="906.70" y="159.5" ></text>
+</g>
+<g >
+<title>syscall.RawSyscall6 (223 samples, 5.35%)</title><rect x="20.2" y="245" width="63.1" height="15.0" fill="rgb(232,185,30)" rx="2" ry="2" />
+<text  x="23.18" y="255.5" >syscal..</text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (2 samples, 0.05%)</title><rect x="1132.6" y="261" width="0.5" height="15.0" fill="rgb(231,102,11)" rx="2" ry="2" />
+<text  x="1135.57" y="271.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Load (2 samples, 0.05%)</title><rect x="1087.0" y="261" width="0.6" height="15.0" fill="rgb(228,34,33)" rx="2" ry="2" />
+<text  x="1090.02" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcache).nextFree (1 samples, 0.02%)</title><rect x="861.3" y="213" width="0.2" height="15.0" fill="rgb(248,22,18)" rx="2" ry="2" />
+<text  x="864.26" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (7 samples, 0.17%)</title><rect x="901.2" y="117" width="1.9" height="15.0" fill="rgb(214,188,46)" rx="2" ry="2" />
+<text  x="904.15" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.startTheWorldWithSema (1 samples, 0.02%)</title><rect x="1147.3" y="277" width="0.3" height="15.0" fill="rgb(229,66,10)" rx="2" ry="2" />
+<text  x="1150.28" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.gcDrainN (1 samples, 0.02%)</title><rect x="1129.2" y="197" width="0.3" height="15.0" fill="rgb(233,113,1)" rx="2" ry="2" />
+<text  x="1132.18" y="207.5" ></text>
+</g>
+<g >
+<title>reflect.Value.Call (170 samples, 4.08%)</title><rect x="925.8" y="277" width="48.1" height="15.0" fill="rgb(230,182,45)" rx="2" ry="2" />
+<text  x="928.77" y="287.5" >refl..</text>
+</g>
+<g >
+<title>runtime.releasem (2 samples, 0.05%)</title><rect x="1082.2" y="197" width="0.6" height="15.0" fill="rgb(209,161,40)" rx="2" ry="2" />
+<text  x="1085.21" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.gcmarknewobject (1 samples, 0.02%)</title><rect x="977.5" y="245" width="0.3" height="15.0" fill="rgb(230,42,43)" rx="2" ry="2" />
+<text  x="980.54" y="255.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*messageOpt).FreeMessage (2 samples, 0.05%)</title><rect x="1124.9" y="309" width="0.6" height="15.0" fill="rgb(248,33,38)" rx="2" ry="2" />
+<text  x="1127.93" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (3 samples, 0.07%)</title><rect x="1119.6" y="261" width="0.8" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="1122.56" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (1 samples, 0.02%)</title><rect x="863.5" y="245" width="0.3" height="15.0" fill="rgb(250,149,28)" rx="2" ry="2" />
+<text  x="866.53" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.findfunc (1 samples, 0.02%)</title><rect x="1104.6" y="133" width="0.2" height="15.0" fill="rgb(213,193,42)" rx="2" ry="2" />
+<text  x="1107.56" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc1 (1 samples, 0.02%)</title><rect x="1073.7" y="133" width="0.3" height="15.0" fill="rgb(238,107,31)" rx="2" ry="2" />
+<text  x="1076.73" y="143.5" ></text>
+</g>
+<g >
+<title>reflect.directlyAssignable (2 samples, 0.05%)</title><rect x="947.5" y="229" width="0.6" height="15.0" fill="rgb(249,42,42)" rx="2" ry="2" />
+<text  x="950.55" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).allocMSpanLocked (2 samples, 0.05%)</title><rect x="1070.6" y="53" width="0.6" height="15.0" fill="rgb(251,72,4)" rx="2" ry="2" />
+<text  x="1073.61" y="63.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*Conn).readAndGetConn (235 samples, 5.63%)</title><rect x="17.1" y="325" width="66.5" height="15.0" fill="rgb(219,25,46)" rx="2" ry="2" />
+<text  x="20.07" y="335.5" >github...</text>
+</g>
+<g >
+<title>runtime.(*mcache).refill (9 samples, 0.22%)</title><rect x="900.9" y="181" width="2.5" height="15.0" fill="rgb(244,79,49)" rx="2" ry="2" />
+<text  x="903.87" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc.func1 (1 samples, 0.02%)</title><rect x="1073.7" y="149" width="0.3" height="15.0" fill="rgb(247,199,5)" rx="2" ry="2" />
+<text  x="1076.73" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.sweepone (20 samples, 0.48%)</title><rect x="1141.1" y="341" width="5.6" height="15.0" fill="rgb(218,49,54)" rx="2" ry="2" />
+<text  x="1144.06" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.forEachP (4 samples, 0.10%)</title><rect x="1147.6" y="293" width="1.1" height="15.0" fill="rgb(208,149,11)" rx="2" ry="2" />
+<text  x="1150.56" y="303.5" ></text>
+</g>
+<g >
+<title>runtime.mallocgc (12 samples, 0.29%)</title><rect x="114.7" y="261" width="3.4" height="15.0" fill="rgb(208,201,51)" rx="2" ry="2" />
+<text  x="117.68" y="271.5" ></text>
+</g>
+<g >
+<title>strconv.formatBits (20 samples, 0.48%)</title><rect x="979.2" y="245" width="5.7" height="15.0" fill="rgb(224,188,37)" rx="2" ry="2" />
+<text  x="982.24" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.spanOf (1 samples, 0.02%)</title><rect x="1044.3" y="133" width="0.3" height="15.0" fill="rgb(221,169,28)" rx="2" ry="2" />
+<text  x="1047.30" y="143.5" ></text>
+</g>
+<g >
+<title>reflect.(*rtype).Out (2 samples, 0.05%)</title><rect x="950.1" y="245" width="0.6" height="15.0" fill="rgb(236,131,30)" rx="2" ry="2" />
+<text  x="953.10" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.asyncPreempt (5 samples, 0.12%)</title><rect x="1040.1" y="213" width="1.4" height="15.0" fill="rgb(246,114,53)" rx="2" ry="2" />
+<text  x="1043.06" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/server.(*Server).handleResult (164 samples, 3.93%)</title><rect x="870.3" y="277" width="46.4" height="15.0" fill="rgb(213,220,48)" rx="2" ry="2" />
+<text  x="873.32" y="287.5" >gith..</text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierBX (1 samples, 0.02%)</title><rect x="150.9" y="213" width="0.3" height="15.0" fill="rgb(233,62,25)" rx="2" ry="2" />
+<text  x="153.89" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.strequal (5 samples, 0.12%)</title><rect x="989.4" y="197" width="1.4" height="15.0" fill="rgb(252,46,34)" rx="2" ry="2" />
+<text  x="992.42" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).alloc (1 samples, 0.02%)</title><rect x="867.2" y="165" width="0.3" height="15.0" fill="rgb(247,66,50)" rx="2" ry="2" />
+<text  x="870.20" y="175.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).Get (6 samples, 0.14%)</title><rect x="98.8" y="261" width="1.7" height="15.0" fill="rgb(221,63,45)" rx="2" ry="2" />
+<text  x="101.83" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrierCX (2 samples, 0.05%)</title><rect x="137.0" y="277" width="0.6" height="15.0" fill="rgb(233,18,46)" rx="2" ry="2" />
+<text  x="140.02" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="137.3" y="229" width="0.3" height="15.0" fill="rgb(242,214,17)" rx="2" ry="2" />
+<text  x="140.31" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Range (5 samples, 0.12%)</title><rect x="856.2" y="213" width="1.4" height="15.0" fill="rgb(232,104,0)" rx="2" ry="2" />
+<text  x="859.17" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.lockWithRank (1 samples, 0.02%)</title><rect x="1145.6" y="309" width="0.3" height="15.0" fill="rgb(209,128,3)" rx="2" ry="2" />
+<text  x="1148.58" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.gentraceback (1 samples, 0.02%)</title><rect x="1133.1" y="181" width="0.3" height="15.0" fill="rgb(222,183,35)" rx="2" ry="2" />
+<text  x="1136.14" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="867.2" y="149" width="0.3" height="15.0" fill="rgb(214,168,26)" rx="2" ry="2" />
+<text  x="870.20" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (1 samples, 0.02%)</title><rect x="1123.2" y="213" width="0.3" height="15.0" fill="rgb(238,45,52)" rx="2" ry="2" />
+<text  x="1126.23" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.dropg (1 samples, 0.02%)</title><rect x="1174.2" y="325" width="0.2" height="15.0" fill="rgb(234,165,27)" rx="2" ry="2" />
+<text  x="1177.16" y="335.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.Marshal.func1 (15 samples, 0.36%)</title><rect x="850.2" y="213" width="4.3" height="15.0" fill="rgb(248,40,43)" rx="2" ry="2" />
+<text  x="853.23" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="124.6" y="229" width="0.3" height="15.0" fill="rgb(252,144,16)" rx="2" ry="2" />
+<text  x="127.58" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/rpcxio/rpcx-benchmark/proto.(*BenchmarkMessage).Unmarshal (302 samples, 7.24%)</title><rect x="997.3" y="229" width="85.5" height="15.0" fill="rgb(231,75,50)" rx="2" ry="2" />
+<text  x="1000.34" y="239.5" >github.com..</text>
+</g>
+<g >
+<title>runtime.handoffp (1 samples, 0.02%)</title><rect x="1147.6" y="277" width="0.2" height="15.0" fill="rgb(208,222,33)" rx="2" ry="2" />
+<text  x="1150.56" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsSetType (2 samples, 0.05%)</title><rect x="1112.2" y="245" width="0.6" height="15.0" fill="rgb(254,30,16)" rx="2" ry="2" />
+<text  x="1115.20" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*pallocBits).summarize (1 samples, 0.02%)</title><rect x="1144.7" y="213" width="0.3" height="15.0" fill="rgb(246,144,3)" rx="2" ry="2" />
+<text  x="1147.74" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.gcDrain (84 samples, 2.01%)</title><rect x="1149.5" y="309" width="23.8" height="15.0" fill="rgb(240,223,14)" rx="2" ry="2" />
+<text  x="1152.54" y="319.5" >r..</text>
+</g>
+<g >
+<title>runtime.efaceeq (3 samples, 0.07%)</title><rect x="957.2" y="181" width="0.8" height="15.0" fill="rgb(220,37,29)" rx="2" ry="2" />
+<text  x="960.17" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.findObject (1 samples, 0.02%)</title><rect x="1108.8" y="197" width="0.3" height="15.0" fill="rgb(215,190,26)" rx="2" ry="2" />
+<text  x="1111.81" y="207.5" ></text>
+</g>
+<g >
+<title>sync.(*poolDequeue).popTail (1 samples, 0.02%)</title><rect x="99.4" y="213" width="0.3" height="15.0" fill="rgb(251,55,19)" rx="2" ry="2" />
+<text  x="102.40" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.bgsweep (23 samples, 0.55%)</title><rect x="1140.8" y="357" width="6.5" height="15.0" fill="rgb(229,215,11)" rx="2" ry="2" />
+<text  x="1143.77" y="367.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).freeSpan.func1 (3 samples, 0.07%)</title><rect x="1144.5" y="277" width="0.8" height="15.0" fill="rgb(232,85,32)" rx="2" ry="2" />
+<text  x="1147.45" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (3 samples, 0.07%)</title><rect x="848.8" y="181" width="0.9" height="15.0" fill="rgb(211,147,54)" rx="2" ry="2" />
+<text  x="851.82" y="191.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (3 samples, 0.07%)</title><rect x="1092.7" y="213" width="0.8" height="15.0" fill="rgb(224,90,10)" rx="2" ry="2" />
+<text  x="1095.68" y="223.5" ></text>
+</g>
+<g >
+<title>reflect.Value.IsZero (2 samples, 0.05%)</title><rect x="916.1" y="261" width="0.6" height="15.0" fill="rgb(216,219,23)" rx="2" ry="2" />
+<text  x="919.15" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).freeSpanLocked (1 samples, 0.02%)</title><rect x="1144.7" y="261" width="0.3" height="15.0" fill="rgb(221,26,39)" rx="2" ry="2" />
+<text  x="1147.74" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.mapaccess2_faststr (7 samples, 0.17%)</title><rect x="1109.1" y="277" width="2.0" height="15.0" fill="rgb(217,206,6)" rx="2" ry="2" />
+<text  x="1112.09" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.procyield (1 samples, 0.02%)</title><rect x="1173.3" y="309" width="0.3" height="15.0" fill="rgb(222,225,17)" rx="2" ry="2" />
+<text  x="1176.31" y="319.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Append (12 samples, 0.29%)</title><rect x="846.6" y="229" width="3.3" height="15.0" fill="rgb(230,217,31)" rx="2" ry="2" />
+<text  x="849.55" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 0.02%)</title><rect x="1147.3" y="213" width="0.3" height="15.0" fill="rgb(232,7,7)" rx="2" ry="2" />
+<text  x="1150.28" y="223.5" ></text>
+</g>
+<g >
+<title>runtime.futexwakeup (1 samples, 0.02%)</title><rect x="1147.6" y="229" width="0.2" height="15.0" fill="rgb(244,2,50)" rx="2" ry="2" />
+<text  x="1150.56" y="239.5" ></text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (7 samples, 0.17%)</title><rect x="1136.0" y="277" width="1.9" height="15.0" fill="rgb(238,29,12)" rx="2" ry="2" />
+<text  x="1138.96" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.(*mcentral).cacheSpan (2 samples, 0.05%)</title><rect x="124.0" y="213" width="0.6" height="15.0" fill="rgb(247,18,41)" rx="2" ry="2" />
+<text  x="127.01" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/protocol/message.(*Message).Length (11 samples, 0.26%)</title><rect x="854.5" y="229" width="3.1" height="15.0" fill="rgb(243,30,43)" rx="2" ry="2" />
+<text  x="857.47" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/middle/codec.(*codecWrapper).Instance (3 samples, 0.07%)</title><rect x="1121.8" y="277" width="0.9" height="15.0" fill="rgb(231,29,29)" rx="2" ry="2" />
+<text  x="1124.82" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.callers.func1 (5 samples, 0.12%)</title><rect x="1074.3" y="117" width="1.4" height="15.0" fill="rgb(215,41,2)" rx="2" ry="2" />
+<text  x="1077.29" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.gosched_m (54 samples, 1.29%)</title><rect x="1173.6" y="341" width="15.3" height="15.0" fill="rgb(232,203,41)" rx="2" ry="2" />
+<text  x="1176.59" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.gcMarkDone (8 samples, 0.19%)</title><rect x="1147.3" y="341" width="2.2" height="15.0" fill="rgb(206,141,10)" rx="2" ry="2" />
+<text  x="1150.28" y="351.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc1 (1 samples, 0.02%)</title><rect x="1129.2" y="213" width="0.3" height="15.0" fill="rgb(240,190,53)" rx="2" ry="2" />
+<text  x="1132.18" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/common/msgparser.(*LMessageParser).ParseMsg (124 samples, 2.97%)</title><rect x="91.8" y="293" width="35.0" height="15.0" fill="rgb(206,45,50)" rx="2" ry="2" />
+<text  x="94.76" y="303.5" >gi..</text>
+</g>
+<g >
+<title>sync.(*poolDequeue).pushHead (1 samples, 0.02%)</title><rect x="150.9" y="229" width="0.3" height="15.0" fill="rgb(225,26,39)" rx="2" ry="2" />
+<text  x="153.89" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.systemstack (1 samples, 0.02%)</title><rect x="1108.8" y="245" width="0.3" height="15.0" fill="rgb(252,69,12)" rx="2" ry="2" />
+<text  x="1111.81" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.gcWriteBarrier (1 samples, 0.02%)</title><rect x="1108.8" y="277" width="0.3" height="15.0" fill="rgb(254,168,4)" rx="2" ry="2" />
+<text  x="1111.81" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush (1 samples, 0.02%)</title><rect x="1108.8" y="261" width="0.3" height="15.0" fill="rgb(245,128,21)" rx="2" ry="2" />
+<text  x="1111.81" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.memmove (6 samples, 0.14%)</title><rect x="852.8" y="197" width="1.7" height="15.0" fill="rgb(222,68,22)" rx="2" ry="2" />
+<text  x="855.78" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.gcAssistAlloc (1 samples, 0.02%)</title><rect x="1138.5" y="293" width="0.3" height="15.0" fill="rgb(214,187,31)" rx="2" ry="2" />
+<text  x="1141.51" y="303.5" ></text>
+</g>
+<g >
+<title>github.com/rpcxio/rpcx-benchmark/proto.encodeVarintBenchmark (25 samples, 0.60%)</title><rect x="889.8" y="229" width="7.1" height="15.0" fill="rgb(236,141,21)" rx="2" ry="2" />
+<text  x="892.84" y="239.5" ></text>
+</g>
+<g >
+<title>runtime/internal/atomic.(*Uint32).CompareAndSwap (2 samples, 0.05%)</title><rect x="1146.7" y="341" width="0.6" height="15.0" fill="rgb(212,153,21)" rx="2" ry="2" />
+<text  x="1149.72" y="351.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).pin (1 samples, 0.02%)</title><rect x="860.1" y="229" width="0.3" height="15.0" fill="rgb(224,60,1)" rx="2" ry="2" />
+<text  x="863.13" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.arenaIndex (1 samples, 0.02%)</title><rect x="1043.2" y="133" width="0.3" height="15.0" fill="rgb(210,185,53)" rx="2" ry="2" />
+<text  x="1046.17" y="143.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (1 samples, 0.02%)</title><rect x="963.4" y="229" width="0.3" height="15.0" fill="rgb(211,121,41)" rx="2" ry="2" />
+<text  x="966.39" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.exitsyscallfast_reacquired (1 samples, 0.02%)</title><rect x="170.4" y="101" width="0.3" height="15.0" fill="rgb(249,221,32)" rx="2" ry="2" />
+<text  x="173.41" y="111.5" ></text>
+</g>
+<g >
+<title>runtime.newobject (12 samples, 0.29%)</title><rect x="1090.1" y="229" width="3.4" height="15.0" fill="rgb(253,163,38)" rx="2" ry="2" />
+<text  x="1093.13" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).nextSpanForSweep (2 samples, 0.05%)</title><rect x="1142.2" y="325" width="0.6" height="15.0" fill="rgb(218,181,8)" rx="2" ry="2" />
+<text  x="1145.19" y="335.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).tryAllocMSpan (1 samples, 0.02%)</title><rect x="1103.4" y="117" width="0.3" height="15.0" fill="rgb(219,79,37)" rx="2" ry="2" />
+<text  x="1106.43" y="127.5" ></text>
+</g>
+<g >
+<title>runtime.(*gcWork).putFast (2 samples, 0.05%)</title><rect x="1172.5" y="277" width="0.5" height="15.0" fill="rgb(244,113,19)" rx="2" ry="2" />
+<text  x="1175.46" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.(*mheap).allocSpan (1 samples, 0.02%)</title><rect x="124.3" y="133" width="0.3" height="15.0" fill="rgb(212,86,4)" rx="2" ry="2" />
+<text  x="127.29" y="143.5" ></text>
+</g>
+<g >
+<title>sync/atomic.StorePointer (1 samples, 0.02%)</title><rect x="99.4" y="197" width="0.3" height="15.0" fill="rgb(242,102,14)" rx="2" ry="2" />
+<text  x="102.40" y="207.5" ></text>
+</g>
+<g >
+<title>reflect.Value.assignTo (4 samples, 0.10%)</title><rect x="950.7" y="245" width="1.1" height="15.0" fill="rgb(230,198,20)" rx="2" ry="2" />
+<text  x="953.66" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.(*consistentHeapStats).acquire (1 samples, 0.02%)</title><rect x="1103.1" y="197" width="0.3" height="15.0" fill="rgb(240,144,34)" rx="2" ry="2" />
+<text  x="1106.15" y="207.5" ></text>
+</g>
+<g >
+<title>runtime.markroot (1 samples, 0.02%)</title><rect x="903.4" y="117" width="0.3" height="15.0" fill="rgb(247,220,17)" rx="2" ry="2" />
+<text  x="906.42" y="127.5" ></text>
+</g>
+<g >
+<title>reflect.valueInterface (5 samples, 0.12%)</title><rect x="920.7" y="245" width="1.4" height="15.0" fill="rgb(243,117,26)" rx="2" ry="2" />
+<text  x="923.67" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.unlock2 (2 samples, 0.05%)</title><rect x="1186.0" y="277" width="0.6" height="15.0" fill="rgb(241,219,21)" rx="2" ry="2" />
+<text  x="1189.04" y="287.5" ></text>
+</g>
+<g >
+<title>runtime.scanobject (56 samples, 1.34%)</title><rect x="1157.5" y="293" width="15.8" height="15.0" fill="rgb(237,101,2)" rx="2" ry="2" />
+<text  x="1160.47" y="303.5" ></text>
+</g>
+<g >
+<title>sync.(*Map).Load (17 samples, 0.41%)</title><rect x="953.5" y="229" width="4.8" height="15.0" fill="rgb(230,75,29)" rx="2" ry="2" />
+<text  x="956.49" y="239.5" ></text>
+</g>
+<g >
+<title>runtime.nextFreeFast (1 samples, 0.02%)</title><rect x="978.7" y="261" width="0.3" height="15.0" fill="rgb(235,188,7)" rx="2" ry="2" />
+<text  x="981.67" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.memclrNoHeapPointers (1 samples, 0.02%)</title><rect x="126.0" y="245" width="0.3" height="15.0" fill="rgb(234,60,24)" rx="2" ry="2" />
+<text  x="128.99" y="255.5" ></text>
+</g>
+<g >
+<title>sync.(*Pool).pin (3 samples, 0.07%)</title><rect x="985.5" y="261" width="0.8" height="15.0" fill="rgb(248,146,38)" rx="2" ry="2" />
+<text  x="988.46" y="271.5" ></text>
+</g>
+<g >
+<title>runtime.profilealloc (1 samples, 0.02%)</title><rect x="1133.1" y="261" width="0.3" height="15.0" fill="rgb(222,88,32)" rx="2" ry="2" />
+<text  x="1136.14" y="271.5" ></text>
+</g>
+<g >
+<title>sync.(*entry).load (1 samples, 0.02%)</title><rect x="958.3" y="229" width="0.3" height="15.0" fill="rgb(235,228,48)" rx="2" ry="2" />
+<text  x="961.30" y="239.5" ></text>
+</g>
+<g >
+<title>github.com/nyan233/littlerpc/pkg/container..Len (1 samples, 0.02%)</title><rect x="109.9" y="245" width="0.2" height="15.0" fill="rgb(206,121,34)" rx="2" ry="2" />
+<text  x="112.87" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.wbBufFlush.func1 (3 samples, 0.07%)</title><rect x="848.8" y="165" width="0.9" height="15.0" fill="rgb(250,23,0)" rx="2" ry="2" />
+<text  x="851.82" y="175.5" ></text>
+</g>
+<g >
+<title>runtime.findObject (1 samples, 0.02%)</title><rect x="965.9" y="149" width="0.3" height="15.0" fill="rgb(241,74,18)" rx="2" ry="2" />
+<text  x="968.94" y="159.5" ></text>
+</g>
+<g >
+<title>runtime.gopreempt_m (1 samples, 0.02%)</title><rect x="97.7" y="245" width="0.3" height="15.0" fill="rgb(212,186,25)" rx="2" ry="2" />
+<text  x="100.70" y="255.5" ></text>
+</g>
+<g >
+<title>runtime.heapBitsForAddr (1 samples, 0.02%)</title><rect x="968.8" y="213" width="0.3" height="15.0" fill="rgb(214,148,10)" rx="2" ry="2" />
+<text  x="971.77" y="223.5" ></text>
+</g>
+<g >
+<title>github.com/lesismal/nbio.(*poller).start (3,987 samples, 95.59%)</title><rect x="10.0" y="357" width="1127.9" height="15.0" fill="rgb(219,155,3)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" >github.com/lesismal/nbio.(*poller).start</text>
+</g>
+<g >
+<title>runtime/internal/syscall.Syscall6 (221 samples, 5.30%)</title><rect x="20.8" y="229" width="62.5" height="15.0" fill="rgb(212,24,19)" rx="2" ry="2" />
+<text  x="23.75" y="239.5" >runtim..</text>
+</g>
+<g >
+<title>runtime.mallocgc (1 samples, 0.02%)</title><rect x="1138.5" y="309" width="0.3" height="15.0" fill="rgb(247,44,54)" rx="2" ry="2" />
+<text  x="1141.51" y="319.5" ></text>
+</g>
+<g >
+<title>runtime.unlockWithRank (3 samples, 0.07%)</title><rect x="1148.7" y="293" width="0.8" height="15.0" fill="rgb(225,140,32)" rx="2" ry="2" />
+<text  x="1151.70" y="303.5" ></text>
+</g>
+</g>
+</svg>
